@@ -1,0 +1,45 @@
+name: Costco Precious Metals → Bluesky
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes (UTC)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: costco-bsky-alert
+  cancel-in-progress: true
+
+jobs:
+  check-and-post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # install all browsers in case we need them
+          playwright install webkit firefox chromium
+          playwright install-deps
+
+      - name: Run Costco → Bluesky alert
+        env:
+          BLSKY_HANDLE: ${{ vars.BLSKY_HANDLE }}
+          BLSKY_APP_PW: ${{ secrets.BLSKY_APP_PW }}
+          ITEM_KEYWORDS: ${{ vars.ITEM_KEYWORDS }}
+          POST_PREFIX: ${{ vars.POST_PREFIX }}
+          DRY_RUN: ${{ vars.DRY_RUN }}
+          TEST_OOS: ${{ vars.TEST_OOS }}
+          TEST_PREFIX: ${{ vars.TEST_PREFIX }}
+        run: |
+          python costcopm_alert.py

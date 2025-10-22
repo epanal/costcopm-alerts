@@ -1,0 +1,4 @@
+playwright
+atproto
+python-dotenv
+requests

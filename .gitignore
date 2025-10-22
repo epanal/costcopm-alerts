@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+
+# Environment files (DO NOT commit credentials)
+.env
+
+# Playwright artifacts (optional)
+playwright-report/
+test-results/
