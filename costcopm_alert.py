@@ -27,7 +27,6 @@ from requests.exceptions import RequestException
 from dotenv import load_dotenv
 from atproto import Client
 
-
 URL = "https://www.costco.com/precious-metals.html"
 
 
@@ -50,6 +49,8 @@ def load_env() -> dict:
         "TEST_OOS": os.getenv("TEST_OOS", "false").lower() in {"1", "true", "yes", "on"},
         "TEST_PREFIX": os.getenv("TEST_PREFIX", "[TEST-OOS]"),
         "FORCE_REQUESTS": os.getenv("FORCE_REQUESTS", "false").lower() in {"1", "true", "yes", "on"},
+        # NEW: whether the script should fail (exit 1) on "no match"
+        "FAIL_ON_NO_MATCH": os.getenv("FAIL_ON_NO_MATCH", "false").lower() in {"1", "true", "yes", "on"},
     }
     if not cfg["BLSKY_HANDLE"] or not cfg["BLSKY_APP_PW"]:
         print("[error] Missing BLSKY_HANDLE or BLSKY_APP_PW in environment.", file=sys.stderr)
@@ -169,7 +170,7 @@ def main():
         print(f"[error] Failed to load page: {e}", file=sys.stderr)
         sys.exit(2)
 
-    # --- TEST_OOS mode: verify pipeline even if fetch is empty (blocked/rate-limited)
+    # --- TEST_OOS mode: verify pipeline against real page when items show "Out of Stock"
     if cfg["TEST_OOS"]:
         oos = contains_out_of_stock(body_text)
         fetch_empty = not body_text or not body_text.strip()
@@ -189,7 +190,7 @@ def main():
                 sys.exit(3)
         else:
             print("[test] No 'Out of Stock' found; test not triggered.")
-            # fall through to normal check
+            # fall through to normal Available check
 
     # --- Normal availability check ---
     if contains_availability(body_text, cfg["ITEM_KEYWORDS"]):
@@ -208,7 +209,8 @@ def main():
             sys.exit(3)
     else:
         print("[info] No 'Available' match (or keywords did not match).")
-        sys.exit(1)
+        # NEW: Do not fail the job unless explicitly configured to do so
+        sys.exit(1 if cfg["FAIL_ON_NO_MATCH"] else 0)
 
 
 if __name__ == "__main__":
