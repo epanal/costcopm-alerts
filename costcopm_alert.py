@@ -141,6 +141,110 @@ def fetch_fusion_via_context(context, save_path: str) -> bool:
         builtins.print(f"[ctx] fetch failed: {e}")
         return False
 
+def scrape_dom_summary(page) -> dict | None:
+    """
+    Crawl the rendered product grid to produce a summary like parse_api_json().
+    Returns None if no grid appears in time.
+    """
+    try:
+        # Give the SPA a fighting chance on CI
+        for _ in range(6):
+            try:
+                # Wait for any of the common containers
+                page.wait_for_selector(
+                    "[data-automation='product-tile'], .product-tile, [data-automation='product-grid'] a",
+                    timeout=2500,
+                )
+                break
+            except Exception:
+                # nudge: scroll and idle a bit
+                try:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                except Exception:
+                    pass
+                page.wait_for_timeout(800)
+        else:
+            # never found a tile container
+            return None
+
+        # Make sure all lazy tiles have had a chance to attach
+        try:
+            page.evaluate("""
+                () => new Promise(r => {
+                    let y = 0, n=0;
+                    const tick = () => {
+                        window.scrollTo(0, y);
+                        y += Math.max(300, innerHeight*0.9);
+                        n += 1;
+                        if (y >= document.body.scrollHeight || n > 12) return r();
+                        setTimeout(tick, 120);
+                    };
+                    tick();
+                })
+            """)
+        except Exception:
+            pass
+        page.wait_for_timeout(700)
+
+        # Collect tiles (union of likely selectors)
+        tiles = []
+        for sel in ("[data-automation='product-tile']", ".product-tile", "[data-automation='product-grid'] a"):
+            try:
+                count = page.locator(sel).count()
+                for i in range(count):
+                    tiles.append((sel, i))
+            except Exception:
+                pass
+
+        if not tiles:
+            return None
+
+        def detect_metal_from_text(t: str) -> str:
+            s = t.lower()
+            if "gold" in s:
+                return "gold"
+            if "silver" in s:
+                return "silver"
+            return "other"
+
+        counts = {"gold": 0, "silver": 0, "other": 0}
+        stock = {
+            "gold": {"in_stock": 0, "out_of_stock": 0},
+            "silver": {"in_stock": 0, "out_of_stock": 0},
+            "other": {"in_stock": 0, "out_of_stock": 0},
+        }
+
+        seen = 0
+        for sel, idx in tiles:
+            loc = page.locator(sel).nth(idx)
+            try:
+                txt = (loc.inner_text(timeout=1000) or "").strip()
+            except Exception:
+                txt = ""
+            if not txt:
+                continue
+
+            m = detect_metal_from_text(txt)
+            counts[m] = counts.get(m, 0) + 1
+            seen += 1
+
+            # crude stock signal from tile text
+            tlow = txt.lower()
+            # many Costco tiles omit "Out of stock"; treat presence of price/“in stock” words as positive
+            in_stock = ("in stock" in tlow) or ("$" in tlow) or ("add to cart" in tlow) or ("price" in tlow)
+            if in_stock:
+                stock[m]["in_stock"] += 1
+            else:
+                stock[m]["out_of_stock"] += 1
+
+        if seen == 0:
+            return None
+
+        return {"numFound": seen, "counts": counts, "stock": stock}
+
+    except Exception:
+        return None
+    
 def fetch_fusion_via_page(page, save_path: str) -> bool:
     """
     Plan A+ (strongest): run fetch() inside the page context so the request
@@ -619,53 +723,73 @@ def check_stock():
                     post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
 
         else:
-            # No JSON captured? Use weaker heuristics.
-            if tile_count > 0 or has_terms:
-                builtins.print("IN STOCK DETECTED! (heuristic)")
-                now = datetime.now()
-                hst = now.astimezone(ZoneInfo("Pacific/Honolulu"))
-                pt  = now.astimezone(ZoneInfo("America/Los_Angeles"))
-                et  = now.astimezone(ZoneInfo("America/New_York"))
-                ts  = f"{hst.strftime('%I:%M %p %Z')} / {pt.strftime('%I:%M %p %Z')} / {et.strftime('%I:%M %p %Z')}"
-                text = (
-                    "🚨 Costco Precious Metals IN STOCK!\n\n"
-                    f"🕓 {ts}\n"
-                    "https://www.costco.com/precious-metals.html\n\n"
-                    "#Costco #Gold #Silver #CostcoPM"
+            # No JSON captured? Try a robust DOM scrape before giving up.
+            dom_summary = scrape_dom_summary(page)
+            if dom_summary:
+                builtins.print(
+                    f"[dom-summary] Parsed {dom_summary['numFound']} tiles → "
+                    f"gold={dom_summary['counts']['gold']} (in {dom_summary['stock']['gold']['in_stock']}), "
+                    f"silver={dom_summary['counts']['silver']} (in {dom_summary['stock']['silver']['in_stock']})"
                 )
-                post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
-            elif is_oos:
-                builtins.print("Out of stock")
-                if POST_STATUS_UPDATES:
-                    now = datetime.now()
-                    hst = now.astimezone(ZoneInfo("Pacific/Honolulu"))
-                    pt  = now.astimezone(ZoneInfo("America/Los_Angeles"))
-                    et  = now.astimezone(ZoneInfo("America/New_York"))
-                    ts  = f"{hst.strftime('%I:%M %p %Z')} / {pt.strftime('%I:%M %p %Z')} / {et.strftime('%I:%M %p %Z')}"
-                    text = (
-                        "Costco Precious Metals — status update\n\n"
-                        f"🕓 {ts}\n"
-                        "No items currently in stock.\n"
-                        "https://www.costco.com/precious-metals.html\n\n"
-                        "#Costco #Gold #Silver #CostcoPM"
-                    )
+                text = build_text_from_summary(dom_summary)
+                g_in = dom_summary["stock"]["gold"]["in_stock"]
+                s_in = dom_summary["stock"]["silver"]["in_stock"]
+                if g_in > 0 or s_in > 0:
+                    builtins.print("IN STOCK DETECTED! (DOM)")
                     post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
+                else:
+                    builtins.print("Out of stock (DOM)")
+                    if POST_STATUS_UPDATES:
+                        builtins.print("[info] Posting OOS status update to Bluesky (DOM)")
+                        post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
             else:
-                builtins.print("Inconclusive")
-                if POST_STATUS_UPDATES and ALWAYS_POST_WHEN_INCONCLUSIVE:
+                # Fall back to heuristics from earlier
+                if tile_count > 0 or has_terms:
+                    builtins.print("IN STOCK DETECTED! (heuristic)")
                     now = datetime.now()
                     hst = now.astimezone(ZoneInfo("Pacific/Honolulu"))
                     pt  = now.astimezone(ZoneInfo("America/Los_Angeles"))
                     et  = now.astimezone(ZoneInfo("America/New_York"))
                     ts  = f"{hst.strftime('%I:%M %p %Z')} / {pt.strftime('%I:%M %p %Z')} / {et.strftime('%I:%M %p %Z')}"
                     text = (
-                        "Costco Precious Metals — status update (signal inconclusive)\n\n"
+                        "🚨 Costco Precious Metals IN STOCK!\n\n"
                         f"🕓 {ts}\n"
-                        "Unable to verify stock status from page payload. Monitoring continues.\n"
                         "https://www.costco.com/precious-metals.html\n\n"
                         "#Costco #Gold #Silver #CostcoPM"
                     )
                     post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
+                elif is_oos:
+                    builtins.print("Out of stock")
+                    if POST_STATUS_UPDATES:
+                        now = datetime.now()
+                        hst = now.astimezone(ZoneInfo("Pacific/Honolulu"))
+                        pt  = now.astimezone(ZoneInfo("America/Los_Angeles"))
+                        et  = now.astimezone(ZoneInfo("America/New_York"))
+                        ts  = f"{hst.strftime('%I:%M %p %Z')} / {pt.strftime('%I:%M %p %Z')} / {et.strftime('%I:%M %p %Z')}"
+                        text = (
+                            "Costco Precious Metals — status update\n\n"
+                            f"🕓 {ts}\n"
+                            "No items currently in stock.\n"
+                            "https://www.costco.com/precious-metals.html\n\n"
+                            "#Costco #Gold #Silver #CostcoPM"
+                        )
+                        post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
+                else:
+                    builtins.print("Inconclusive")
+                    if POST_STATUS_UPDATES and ALWAYS_POST_WHEN_INCONCLUSIVE:
+                        now = datetime.now()
+                        hst = now.astimezone(ZoneInfo("Pacific/Honolulu"))
+                        pt  = now.astimezone(ZoneInfo("America/Los_Angeles"))
+                        et  = now.astimezone(ZoneInfo("America/New_York"))
+                        ts  = f"{hst.strftime('%I:%M %p %Z')} / {pt.strftime('%I:%M %p %Z')} / {et.strftime('%I:%M %p %Z')}"
+                        text = (
+                            "Costco Precious Metals — status update (signal inconclusive)\n\n"
+                            f"🕓 {ts}\n"
+                            "Unable to verify stock status from page payload. Monitoring continues.\n"
+                            "https://www.costco.com/precious-metals.html\n\n"
+                            "#Costco #Gold #Silver #CostcoPM"
+                        )
+                        post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
 
         try: browser.close()
         except Exception:
