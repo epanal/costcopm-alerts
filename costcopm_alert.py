@@ -18,7 +18,7 @@ from atproto import Client, models
 load_dotenv()
 
 IS_CI = bool(os.getenv("CI"))
-USE_BROWSER = os.getenv("BROWSER", "firefox" if not IS_CI else "chromium").lower()
+USE_BROWSER = os.getenv("BROWSER", "webkit" if IS_CI else "firefox").lower()
 HEADLESS = os.getenv("HEADLESS", "true").lower() in {"1", "true", "yes", "on"}
 
 BSKY_HANDLE = os.getenv("BSKY_HANDLE")
@@ -154,70 +154,50 @@ def check_stock():
 
             print("Loading Costco...")
             resp, last_err = None, None
-            for wait in ("load", "domcontentloaded", "networkidle"):
+
+            if IS_CI:
+                # On CI/CDN, don't wait for load events that may never fire
                 try:
-                    resp = page.goto(URL, wait_until=wait, timeout=TIMEOUT)
-                    break
+                    resp = page.goto(URL, wait_until="commit", timeout=30_000)
                 except Exception as e:
                     last_err = e
-                    print(f"[goto] {USE_BROWSER} failed ({wait}): {e}")
-
-            # If Firefox fails locally, try WebKit next; if that fails, try Chrome channel
-            if resp is None and not IS_CI:
-                for fallback in ("webkit", "chrome"):
-                    print(f"[warn] {USE_BROWSER} failed; retrying with {fallback} ...")
+                    print(f"[goto] commit failed on CI: {e}")
+            else:
+                # Local: try normal wait strategies
+                for wait in ("load", "domcontentloaded", "networkidle"):
                     try:
-                        browser.close()
-                    except Exception:
-                        pass
-                    os.environ["BROWSER"] = fallback
-                    browser, context, page = launch_browser(p)
-                    for wait in ("load", "domcontentloaded", "networkidle"):
-                        try:
-                            resp = page.goto(URL, wait_until=wait, timeout=TIMEOUT)
-                            break
-                        except Exception as e:
-                            last_err = e
-                            print(f"[goto] {fallback} failed ({wait}): {e}")
-                    if resp is not None:
+                        resp = page.goto(URL, wait_until=wait, timeout=90_000)
                         break
+                    except Exception as e:
+                        last_err = e
+                        print(f"[goto] {USE_BROWSER} failed ({wait}): {e}")
 
             if resp is None:
-                print(f"[error] Page failed to load after retries. Last error: {last_err}")
+                print(f"[error] Page failed to initiate. Last error: {last_err}")
                 print("Inconclusive")
                 try: browser.close()
-                except Exception: pass
+                except: pass
                 return
 
-            status = resp.status if resp else None
-            print(f"[nav] status={status} url={page.url} title={page.title()!r}")
-
-            # Cookie/consent
+            # After commit, give scripts time and try to find content
             try:
-                page.locator("#onetrust-accept-btn-handler, button:has-text('Accept All Cookies')").first.click(timeout=2500)
-                print("[info] Cookie banner accepted")
+                page.wait_for_load_state("networkidle", timeout=20_000)
             except Exception:
                 pass
 
-            # Allow scripts/requests
-            try:
-                page.wait_for_load_state("networkidle", timeout=30_000)
-            except Exception:
-                pass
-
-            # Encourage grid visibility (non-fatal)
             for sel in (
                 '[data-automation="product-grid"]',
                 '[data-automation="product-tile"]',
                 '.product-tile',
-                '.no-results',
+                '.no-results'
             ):
                 try:
-                    page.wait_for_selector(sel, timeout=8_000)
+                    page.wait_for_selector(sel, timeout=10_000)
                     print(f"[info] Found selector: {sel}")
                     break
                 except Exception:
                     pass
+
 
             # Screenshot + DOM
             if not page.is_closed():

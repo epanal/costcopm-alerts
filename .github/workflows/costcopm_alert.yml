@@ -1,23 +1,20 @@
+# .github/workflows/costcopm_alert.yml
 name: Costco Precious Metals Alert
 
 on:
   schedule:
-    # Every 30 minutes
     - cron: "*/30 * * * *"
-  workflow_dispatch:  # allow manual runs
+  workflow_dispatch:
 
 jobs:
   check:
     runs-on: ubuntu-latest
-
     env:
       BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
       BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
-      CI: true
-      BROWSER: chromium
-      HEADLESS: true
-      # Optional if you only want posts during the day:
-      # POST_ONLY_DURING_DAY: true
+      CI: "1"
+      BROWSER: webkit          # <- use WebKit on CI
+      HEADLESS: "true"
 
     steps:
       - name: Checkout repo
@@ -26,15 +23,25 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install playwright python-dotenv atproto
-          playwright install --with-deps chromium
+          python -m playwright install --with-deps webkit   # <- install webkit
 
       - name: Run CostcoPM alert
         run: |
           echo "Running Costco Precious Metals Alert..."
           python costcopm_alert.py
+
+      # Optional: collect artifacts for debugging
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: costcopm-debug
+          path: |
+            costco.png
+            page.html
