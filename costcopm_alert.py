@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo  # Python 3.9+
 load_dotenv()  # <-- reads .env in the current directory
 
 USE_BROWSER = os.getenv("BROWSER", "firefox" if not os.getenv("CI") else "chromium")
+HEADLESS = True  # Actions headless; you can keep this hardcoded
 
 
 # Read credentials from environment
@@ -121,40 +122,76 @@ def check_stock():
     with sync_playwright() as p:
         try:
             print("Launching browser...")
+
+            # Pick engine based on env (Chromium on CI; Firefox locally) 
             if USE_BROWSER == "chromium":
-                # CI: force HTTP/1.1 to bypass Cloudflare HTTP/2 block
-                chromium_args = [
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-http2",          # THIS LINE FIXES ERR_HTTP2_PROTOCOL_ERROR
-                ]
-                if os.getenv("CI"):
-                    chromium_args.append("--disable-gpu")
-                browser = p.chromium.launch(headless=True, args=chromium_args)
-                ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                engine = "chromium"
             else:
-                browser = p.firefox.launch(headless=True, args=["--no-sandbox"])
+                engine = "firefox"
+
+            if engine == "chromium":
+                browser = p.chromium.launch(headless=HEADLESS, args=["--no-sandbox", "--disable-dev-shm-usage"])
+                ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+            else:
+                browser = p.firefox.launch(headless=HEADLESS, args=["--no-sandbox"])
                 ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:129.0) Gecko/20100101 Firefox/129.0"
 
             context = browser.new_context(
                 viewport={"width": 1920, "height": 1080},
                 user_agent=ua,
-                ignore_https_errors=True,   # helps with occasional CDN/TLS quirks on CI
+                ignore_https_errors=True,  # helps with some CDN/TLS quirks on CI
             )
             page = context.new_page()
 
-            # Keep resource-thinning locally; allow full load on CI
+            # On CI, DO NOT block CSS/fonts; locally keep your performance filter
             if not os.getenv("CI"):
                 page.route("**/*", lambda route: route.abort()
                         if route.request.resource_type in ["stylesheet", "font", "media"]
                         else route.continue_())
-            else:
-                # On CI, do NOT block stylesheets/JS/images
-                pass
 
             print("Loading Costco...")
-            page.goto(URL, wait_until="domcontentloaded", timeout=TIMEOUT)
+
+            def try_goto(wait_until: str):
+                return page.goto(URL, wait_until=wait_until, timeout=TIMEOUT)
+
+            resp = None
+            error = None
+            for wait in ("load", "domcontentloaded", "networkidle"):
+                try:
+                    resp = try_goto(wait)
+                    break
+                except Exception as e:
+                    error = e
+                    print(f"[goto] failed with wait_until={wait}: {e}")
+
+            # If Chromium failed on CI with HTTP/2 error, fall back to Firefox once
+            if resp is None and os.getenv("CI") and engine == "chromium":
+                print("[warn] Chromium goto failed; retrying with Firefox fallback...")
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+                browser = p.firefox.launch(headless=HEADLESS, args=["--no-sandbox"])
+                context = browser.new_context(
+                    viewport={"width": 1920, "height": 1080},
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:129.0) Gecko/20100101 Firefox/129.0",
+                    ignore_https_errors=True,
+                )
+                page = context.new_page()
+                # keep resources unblocked on CI
+                # (no page.route here)
+                try:
+                    resp = page.goto(URL, wait_until="load", timeout=TIMEOUT)
+                except Exception as e:
+                    error = e
+
+            if resp is None:
+                print(f"[error] Page failed to load after retries. Last error: {error}")
+                print("Inconclusive")
+                browser.close()
+                return
+            
             page.wait_for_function("document.body && document.body.innerText.length > 200", timeout=60_000)
 
             print("Waiting for images and product grid to load...")

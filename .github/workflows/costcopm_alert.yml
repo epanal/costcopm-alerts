@@ -1,3 +1,4 @@
+# .github/workflows/costcopm.yml
 name: CostcoPM Bot
 
 on:
@@ -19,17 +20,17 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install deps (Playwright + browsers)
         run: |
           python -m pip install -U pip
           pip install -r requirements.txt
-          python -m playwright install --with-deps chromium
+          python -m playwright install --with-deps chromium firefox
 
-      - name: Run CostcoPM alert
+      - name: Run CostcoPM
         env:
           BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
           BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
           BROWSER: chromium
-          CI: "true"                    # ENSURE CI DETECTION
+          CI: "1"
         run: |
           python costcopm_alert.py
