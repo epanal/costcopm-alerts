@@ -421,6 +421,76 @@ def launch_browser(p):
     except Exception as e:
         raise RuntimeError(f"Failed to launch {USE_BROWSER} (HEADLESS={HEADLESS}, CI={IS_CI}): {e}") from e
 
+## Screenshot
+def take_fully_loaded_screenshot(page, path: str, *, min_bytes: int = 200_000) -> None:
+    """Scrolls to trigger lazy-loading, waits for images to load, then captures a full-page screenshot."""
+    try:
+        # 1) Wait for something meaningful on the page
+        try:
+            page.wait_for_selector("[data-automation='product-grid'], [data-automation='product-tile'], .product-tile", timeout=10_000)
+        except Exception:
+            pass
+
+        # 2) Nudge network to settle
+        try:
+            page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass
+
+        # 3) Progressive scroll to trigger lazy images
+        page.evaluate("""
+            () => new Promise(resolve => {
+              let y = 0, steps = 0;
+              const step = () => {
+                window.scrollTo(0, y);
+                y += Math.max(300, innerHeight * 0.9);
+                steps++;
+                if (y >= document.body.scrollHeight || steps > 20) return resolve();
+                setTimeout(step, 120);
+              };
+              step();
+            })
+        """)
+        page.wait_for_timeout(700)
+
+        # 4) Wait for images to finish loading
+        page.wait_for_function("""
+            () => Array.from(document.images || []).every(img => img.complete && img.naturalWidth > 0)
+        """, timeout=7000)
+
+        # 5) One more idle wait
+        try:
+            page.wait_for_load_state("networkidle", timeout=3000)
+        except Exception:
+            pass
+
+        # 6) Return to top for a nicer screenshot
+        try:
+            page.evaluate("window.scrollTo(0, 0)")
+            page.wait_for_timeout(250)
+        except Exception:
+            pass
+
+        # 7) Capture full-page
+        page.screenshot(path=path, full_page=True)
+
+        # 8) If it looks suspiciously small, retry once after another settle
+        try:
+            import os
+            if os.path.exists(path) and os.path.getsize(path) < min_bytes:
+                page.wait_for_timeout(1500)
+                page.screenshot(path=path, full_page=True)
+        except Exception:
+            pass
+
+    except Exception as e:
+        builtins.print(f"[warn] take_fully_loaded_screenshot failed: {e}")
+        # Fallback—still try to save *something*
+        try:
+            page.screenshot(path=path, full_page=True)
+        except Exception:
+            pass
+
 # ------------------------------------------------------------------------------
 # Main flow
 # ------------------------------------------------------------------------------
@@ -481,7 +551,7 @@ def check_stock():
         # Artifacts
         if not page.is_closed():
             try:
-                page.screenshot(path=SCREENSHOT, full_page=True)
+                take_fully_loaded_screenshot(page, SCREENSHOT)
                 builtins.print(f"Screenshot saved: {os.path.abspath(SCREENSHOT)}")
             except Exception as e:
                 builtins.print(f"[warn] screenshot failed: {e}")
