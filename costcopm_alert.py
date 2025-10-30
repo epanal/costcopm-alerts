@@ -96,30 +96,34 @@ def post_to_bluesky(image_path: str) -> None:
 
 # ----------------------------------------------------------------------
 def launch_browser(p):
-    """Launch requested browser; disable HTTP/2/QUIC on Chromium/Chrome to avoid ERR_HTTP2_PROTOCOL_ERROR locally.
-       Only use --no-sandbox/--disable-dev-shm-usage on CI (those can crash headful locally)."""
+    """Launch the requested browser.
+    Only pass --no-sandbox/--disable-dev-shm-usage for chromium/firefox on CI.
+    Never pass them to webkit (it will crash)."""
     args = []
-    if IS_CI:
-        args += ["--no-sandbox", "--disable-dev-shm-usage"]
 
     if USE_BROWSER in ("chromium", "chrome"):
-        # Mitigate HTTP/2/QUIC issues locally
-        args += ["--disable-http2", "--disable-quic"]
-        if USE_BROWSER == "chrome":
-            browser = p.chromium.launch(channel="chrome", headless=HEADLESS, args=args)
-        else:
-            browser = p.chromium.launch(headless=HEADLESS, args=args)
+        # On CI, these flags are needed for Chromium; fine to include only here
+        if IS_CI:
+            args += ["--no-sandbox", "--disable-dev-shm-usage"]
+        browser = (
+            p.chromium.launch(channel="chrome", headless=HEADLESS, args=args)
+            if USE_BROWSER == "chrome"
+            else p.chromium.launch(headless=HEADLESS, args=args)
+        )
         ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-    elif USE_BROWSER == "webkit":
-        browser = p.webkit.launch(headless=HEADLESS, args=args)
-        ua = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-              "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15")
-
-    else:  # firefox
+    elif USE_BROWSER == "firefox":
+        if IS_CI:
+            args += ["--no-sandbox", "--disable-dev-shm-usage"]
         browser = p.firefox.launch(headless=HEADLESS, args=args)
         ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:129.0) Gecko/20100101 Firefox/129.0"
+
+    else:  # webkit
+        # IMPORTANT: no --no-sandbox / --disable-dev-shm-usage for webkit
+        browser = p.webkit.launch(headless=HEADLESS, args=[])
+        ua = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+              "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15")
 
     context = browser.new_context(
         viewport={"width": 1920, "height": 1080},
