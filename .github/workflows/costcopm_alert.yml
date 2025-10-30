@@ -45,3 +45,4 @@ jobs:
           path: |
             costco.png
             page.html
+            api-sample.json
