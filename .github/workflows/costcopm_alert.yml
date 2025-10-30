@@ -3,16 +3,13 @@ name: CostcoPM Bot
 
 on:
   schedule:
-    - cron: "*/30 * * * *"  # every 30 min UTC
+    - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    concurrency:
-      group: costcopm-bot
-      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -27,13 +24,12 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install -r requirements.txt
-          # Install Chromium browser + dependencies (instead of Firefox)
           python -m playwright install --with-deps chromium
 
       - name: Run CostcoPM alert
         env:
           BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
           BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
-          POST_ONLY_DURING_DAY: "true"
+          BROWSER: chromium     # <-- force Chromium on CI
         run: |
           python costcopm_alert.py

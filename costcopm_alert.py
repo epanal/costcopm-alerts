@@ -5,23 +5,25 @@ Credentials loaded from .env
 """
 
 import os
-import re
-import sys
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
-from atproto import Client, models
+from atproto import Client
+import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo  # Python 3.9+
 
 # ----------------------------------------------------------------------
 # Load .env file
-load_dotenv()  # reads .env in the current directory
+load_dotenv()  # <-- reads .env in the current directory
+
+USE_BROWSER = os.getenv("BROWSER", "firefox" if not os.getenv("CI") else "chromium")
+
 
 # Read credentials from environment
 BSKY_HANDLE = os.getenv("BSKY_HANDLE")
 BSKY_APP_PASSWORD = os.getenv("BSKY_APP_PASSWORD")
 
-# Validate credentials
+# Validate
 if not BSKY_HANDLE or not BSKY_APP_PASSWORD:
     print("ERROR: BSKY_HANDLE or BSKY_APP_PASSWORD missing in .env")
     sys.exit(1)
@@ -31,18 +33,22 @@ URL = "https://www.costco.com/precious-metals.html"
 SCREENSHOT = "costco.png"
 TIMEOUT = 90_000
 
-# ----------------------------------------------------------------------
-# --- Facet helpers (URLs + Hashtags) ---
-HASHTAG_RE = re.compile(r"(?<!\w)#([A-Za-z0-9_]+)")
-URL_RE = re.compile(r"https?://[^\s\)\]\}>,]+")
+IN_STOCK_TEXT = "Buy Gold Bars and Coins at Costco"
+OOS_TEXT = "we're sorry. we were not able to find a match"
 
+# ----------------------------------------------------------------------
+from atproto import Client, models
+import re
+
+# --- Facets helpers (URLs + Hashtags) ---
+HASHTAG_RE = re.compile(r'(?<!\w)#([A-Za-z0-9_]+)')
+URL_RE = re.compile(r'https?://[^\s\)\]\}>,]+')  # avoid trailing ) ] } , >
 
 def _byte_slice(text: str, start: int, end: int) -> models.AppBskyRichtextFacet.ByteSlice:
-    """Convert char offsets to UTF-8 byte offsets (required by Bluesky facets)."""
-    byte_start = len(text[:start].encode("utf-8"))
-    byte_end = byte_start + len(text[start:end].encode("utf-8"))
+    # Bluesky facets use UTF-8 byte offsets, not codepoints
+    byte_start = len(text[:start].encode('utf-8'))
+    byte_end = byte_start + len(text[start:end].encode('utf-8'))
     return models.AppBskyRichtextFacet.ByteSlice(byte_start=byte_start, byte_end=byte_end)
-
 
 def build_facets(text: str):
     facets = []
@@ -69,19 +75,16 @@ def build_facets(text: str):
 
     return facets
 
-
-# ----------------------------------------------------------------------
 def post_to_bluesky(image_path: str) -> None:
-    """Uploads a screenshot and posts to Bluesky with hashtags and timestamp."""
     try:
         client = Client()
         client.login(BSKY_HANDLE, BSKY_APP_PASSWORD)
 
-        # Upload image as blob
+        # 1) Upload the image as a blob
         with open(image_path, "rb") as f:
             upload = client.upload_blob(f.read())
 
-        # Build image embed
+        # 2) Build an images embed
         embed = models.AppBskyEmbedImages.Main(
             images=[
                 models.AppBskyEmbedImages.Image(
@@ -91,133 +94,78 @@ def post_to_bluesky(image_path: str) -> None:
             ]
         )
 
-        # Timestamp in HST + ET
-        now_hst = datetime.now(ZoneInfo("Pacific/Honolulu"))
-        now_et = datetime.now(ZoneInfo("America/New_York"))
-        timestamp = f"{now_hst.strftime('%I:%M %p %Z')} / {now_et.strftime('%I:%M %p %Z')}"
+        # 3) Post text with clickable URL + hashtags (via facets)
+        now = datetime.now()
+        hst = now.astimezone(ZoneInfo("Pacific/Honolulu"))
+        pt = now.astimezone(ZoneInfo("America/Los_Angeles"))
+        et = now.astimezone(ZoneInfo("America/New_York"))
 
-        # Post body
+        timestamp = f"{hst.strftime('%I:%M %p %Z')} / {pt.strftime('%I:%M %p %Z')} / {et.strftime('%I:%M %p %Z')}"
+
         text = (
             f"🚨 Costco Precious Metals IN STOCK!\n\n"
             f"🕓 {timestamp}\n"
             f"https://www.costco.com/precious-metals.html\n\n"
             "#Costco #Gold #Silver #CostcoPM"
         )
-
         facets = build_facets(text)
+
         client.send_post(text=text, embed=embed, facets=facets if facets else None)
         print("Bluesky post sent!")
-
     except Exception as e:
         print(f"Bluesky post failed: {e}", file=sys.stderr)
 
 
 # ----------------------------------------------------------------------
-def normalize(s: str) -> str:
-    return re.sub(r"[\W_]+", " ", s.lower()).strip()
-
-
 def check_stock():
-    """Check Costco precious metals page for in-stock items."""
     with sync_playwright() as p:
         try:
             print("Launching browser...")
-            try:
-                # Try Firefox first
+            if USE_BROWSER == "chromium":
+                browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+                ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+            else:
                 browser = p.firefox.launch(headless=True, args=["--no-sandbox"])
-            except Exception:
-                print("[warn] Firefox launch failed; falling back to Chromium.")
-                browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+                ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:129.0) Gecko/20100101 Firefox/129.0"
 
             context = browser.new_context(
                 viewport={"width": 1920, "height": 1080},
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:129.0) Gecko/20100101 Firefox/129.0",
+                user_agent=ua,
+                ignore_https_errors=True,   # helps with occasional CDN/TLS quirks on CI
             )
             page = context.new_page()
 
-            # Optionally skip heavy assets (CSS/fonts/images)
-            page.route(
-                "**/*",
-                lambda route: route.abort()
-                if route.request.resource_type in ["font", "media"]
-                else route.continue_(),
-            )
+            # Keep resource-thinning locally; allow full load on CI
+            if not os.getenv("CI"):
+                page.route("**/*", lambda route: route.abort()
+                        if route.request.resource_type in ["stylesheet", "font", "media"]
+                        else route.continue_())
+            else:
+                # On CI, do NOT block stylesheets/JS/images
+                pass
 
             print("Loading Costco...")
             page.goto(URL, wait_until="domcontentloaded", timeout=TIMEOUT)
             page.wait_for_function("document.body && document.body.innerText.length > 200", timeout=60_000)
 
-            print("Waiting for product grid or fallback text...")
+            print("Waiting for images and product grid to load...")
             page.wait_for_load_state("networkidle", timeout=30_000)
-
-            selectors = [
-                '[data-automation="product-grid"]',
-                '[data-automation="product-tile"]',
-                ".product-tile",
-                ".no-results",
-                'text=/we\\s*re\\s*sorry/i',
-            ]
-            for sel in selectors:
-                try:
-                    page.wait_for_selector(sel, timeout=10_000)
-                    break
-                except Exception:
-                    pass
+            try:
+                page.wait_for_selector("img", state="visible", timeout=15_000)
+            except:
+                pass
 
             screenshot_path = os.path.abspath(SCREENSHOT)
             page.screenshot(path=SCREENSHOT, full_page=True)
             print(f"Screenshot saved: {screenshot_path}")
 
-            title = page.title()
-            body_text = page.inner_text("body")[:2000]
-            html = page.content()
+            html = page.content().lower()
 
-            # --- Bot protection check ---
-            if (
-                "access denied" in title.lower()
-                or "reference #" in body_text.lower()
-                or "request was blocked" in body_text.lower()
-            ):
-                print("[warn] Likely blocked by bot protection (Akamai/Edge). Title:", title)
-                print("[debug] Body preview:", normalize(body_text)[:300])
-                print("Inconclusive")
-                return
-
-            # --- Detect stock status ---
-            norm = normalize(body_text)
-            OOS_PHRASES = [
-                "we were not able to find a match",
-                "no results found",
-                "did not match any products",
-            ]
-            is_oos = any(p in norm for p in OOS_PHRASES)
-
-            # Product tiles
-            product_tile_count = 0
-            for sel in (
-                '[data-automation="product-tile"]',
-                ".product-tile",
-                '[data-automation="product-grid"] a',
-            ):
-                try:
-                    c = page.locator(sel).count()
-                    if c and c > product_tile_count:
-                        product_tile_count = c
-                except Exception:
-                    pass
-
-            has_precious_terms = any(
-                t in norm for t in ["gold bar", "gold bars", "silver bar", "silver bars", "precious metals"]
-            )
-
-            print(
-                f"[debug] title='{title}' tiles={product_tile_count} oos={is_oos} keywords={has_precious_terms}"
-            )
-
-            if product_tile_count > 0 or has_precious_terms:
+            if IN_STOCK_TEXT.lower() in html:
                 print("IN STOCK DETECTED!")
                 post_to_bluesky(SCREENSHOT)
-            elif is_oos:
+            elif OOS_TEXT.lower() in html:
                 print("Out of stock")
             else:
                 print("Inconclusive")
@@ -226,7 +174,6 @@ def check_stock():
 
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
-
 
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
