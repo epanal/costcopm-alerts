@@ -14,344 +14,10 @@
       }
     ],
     "X-Fusion-IncludesFSACHDI": "0",
-    "fusionQueryId": "KKrKlLiN9g"
+    "fusionQueryId": "0rlnAIx8Lb"
   },
   "response": {
     "docs": [
-      {
-        "Precious_Metal_Form_attr": [
-          "Gold Bar"
-        ],
-        "item_product_name": "1 oz Gold Bar PAMP Suisse Good Luck Yellow Dragon (New in Assay)",
-        "item_fsa_eligible": false,
-        "item_product_marketing_features": [
-          "Limit of 1 Transaction Per Membership, with a Maximum of 4 Units Per 24 Hours;\n24kt Gold;\nItem is Non-Refundable;\nItem is Not Eligible for Price Adjustments"
-        ],
-        "item_buyable": true,
-        "item_chdi_eligible": false,
-        "content_type": [
-          "product"
-        ],
-        "Packaging_Type_attr": [
-          "In Assay"
-        ],
-        "item_short_description": "1 oz Gold Bar PAMP Suisse Good Luck Yellow Dragon (New in Assay)",
-        "item_ratings": 4.839000225067139,
-        "item_status_published": true,
-        "item_eligible_for_review": "true",
-        "item_searchable": true,
-        "item_disponzeroinv": false,
-        "item_review_ratings": "4.839000225067139",
-        "item_program_eligibility": [
-          "SiteControlledInventory",
-          "Standard",
-          "ShipIt"
-        ],
-        "Edge_Design_attr": [
-          "Smooth"
-        ],
-        "categoryPath_ss": [
-          "/precious-metals.html",
-          "/jewelry.html"
-        ],
-        "item_location_pricing_pricePerUnit_price": 4179.99,
-        "item_as400_department": "35",
-        "description": "1 oz Gold Bar PAMP Suisse Good Luck Yellow Dragon (New in Assay)",
-        "item_rating_value": [
-          "1 & Up",
-          "2 & Up",
-          "3 & Up",
-          "4 & Up"
-        ],
-        "item_product_short_description": "1 oz Gold Bar PAMP Suisse Good Luck Yellow Dragon (New in Assay)",
-        "Metal_Weight_attr": [
-          "1 Troy Ounce"
-        ],
-        "item_location_pricing_salePrice": 4179.99,
-        "Series_attr": [
-          "Good Luck"
-        ],
-        "item_product_marketing_statement": "",
-        "item_variableweight": false,
-        "item_member_only": true,
-        "item_collateral_primaryimage": "https://bfasset.costco-static.com/U447IH35/as/w3nqfqjqhxpsj6r66mmjkfsp/4000375430-847__1?auto=webp&format=jpg&width=350&height=350&fit=bounds&canvas=350,350",
-        "item_product_comparable": true,
-        "group_id": "4000375430",
-        "item_classification_itemclass": "Standard",
-        "item_product_status_disponzeroinv": false,
-        "item_product_image_swatchable": false,
-        "item_comparable": true,
-        "item_name": "1 oz Gold Bar PAMP Suisse Good Luck Yellow Dragon (New in Assay)",
-        "image": "https://bfasset.costco-static.com/U447IH35/as/w3nqfqjqhxpsj6r66mmjkfsp/4000375430-847__1?auto=webp&format=jpg&width=350&height=350&fit=bounds&canvas=350,350",
-        "item_product_buyable": true,
-        "Purity_attr": [
-          ".9999 Pure Gold (24k)"
-        ],
-        "item_number": "8888808",
-        "item_product_primary_image": "https://bfasset.costco-static.com/U447IH35/as/w3nqfqjqhxpsj6r66mmjkfsp/4000375430-847__1?auto=webp&format=jpg&width=350&height=350&fit=bounds&canvas=350,350",
-        "item_location_pricing_listPrice": 4179.99,
-        "item_manufacturing_skus": [
-          "4000008888808"
-        ],
-        "item_as400_category": "LLL",
-        "item_product_status_published": true,
-        "Brand_attr": [
-          "PAMP"
-        ],
-        "item_product_review_eligible": true,
-        "name": "1 oz Gold Bar PAMP Suisse Good Luck Yellow Dragon (New in Assay)",
-        "item_product_price_in_cart_only": "1",
-        "item_image_swatchable": false,
-        "id": "8888808!item.en-US",
-        "item_product_status_backorderqty": 0,
-        "item_backorderflag": 0,
-        "item_product_status_backorderflag": 0,
-        "item_startDate": "2025-07-07T00:00:00Z",
-        "item_review_count": 0,
-        "item_product_review_count": 826,
-        "item_rating_average_value": 0,
-        "item_backorderqty": 0,
-        "isFutureDate": false,
-        "deliveryStatus": "out of stock",
-        "item_location_availability": "in stock",
-        "item_location_stockStatus": "in stock",
-        "item_location_itemNumber": "8888808",
-        "item_location_locationNumber": "423-wh",
-        "item_location_fulfillment_restrictions_minQty": "1",
-        "item_location_fulfillment_restrictions_maxQty": "4",
-        "item_location_currencyCode": "USD",
-        "hasSingleSku": true,
-        "minSalePrice": 4179.99,
-        "maxSalePrice": 4179.99,
-        "isItemInStock": true,
-        "images": [
-          {
-            "item_collateral_primaryimage": "https://bfasset.costco-static.com/U447IH35/as/w3nqfqjqhxpsj6r66mmjkfsp/4000375430-847__1?auto=webp&format=jpg&width=350&height=350&fit=bounds&canvas=350,350"
-          }
-        ]
-      },
-      {
-        "Precious_Metal_Form_attr": [
-          "Silver Bar"
-        ],
-        "item_product_name": "10 oz Silver Bar PAMP Lady of Liberty",
-        "item_fsa_eligible": false,
-        "item_product_marketing_features": [
-          "Limit of 1 Transaction Per Membership, with a Maximum of 10 Units Per 24 Hours;\n10 oz Silver Bar;\nItem is Non-Refundable;\nItem is Not Eligible for Price Adjustments"
-        ],
-        "item_buyable": true,
-        "item_chdi_eligible": false,
-        "content_type": [
-          "product"
-        ],
-        "item_short_description": "10 oz Silver Bar PAMP Lady of Liberty",
-        "item_ratings": 4.801000118255615,
-        "EDD_CHUBSmallPack_attr": [
-          "0",
-          "0"
-        ],
-        "item_status_published": true,
-        "item_eligible_for_review": "true",
-        "item_searchable": true,
-        "item_disponzeroinv": false,
-        "item_review_ratings": "4.801000118255615",
-        "item_program_eligibility": [
-          "SiteControlledInventory",
-          "Standard",
-          "ShipIt"
-        ],
-        "Edge_Design_attr": [
-          "Smooth"
-        ],
-        "categoryPath_ss": [
-          "/precious-metals.html",
-          "/jewelry.html"
-        ],
-        "item_location_pricing_pricePerUnit_price": 529.99,
-        "item_as400_department": "35",
-        "description": "10 oz Silver Bar PAMP Lady of Liberty",
-        "item_rating_value": [
-          "1 & Up",
-          "2 & Up",
-          "3 & Up",
-          "4 & Up"
-        ],
-        "item_product_short_description": "10 oz Silver Bar PAMP Lady of Liberty",
-        "Metal_Weight_attr": [
-          "10 Troy Ounce"
-        ],
-        "item_location_pricing_salePrice": 529.99,
-        "Series_attr": [
-          "PAMP Lady of Liberty"
-        ],
-        "item_product_marketing_statement": "",
-        "item_variableweight": false,
-        "item_member_only": true,
-        "item_collateral_primaryimage": "https://bfasset.costco-static.com/U447IH35/as/bt3z3gw7zjvppsfg9hqpnxn/1814002-847__1?auto=webp&format=jpg&width=350&height=350&fit=bounds&canvas=350,350",
-        "item_product_comparable": true,
-        "group_id": "4000292478",
-        "item_classification_itemclass": "Standard",
-        "item_product_status_disponzeroinv": false,
-        "item_product_image_swatchable": false,
-        "item_comparable": true,
-        "item_name": "10 oz Silver Bar PAMP Lady of Liberty",
-        "image": "https://bfasset.costco-static.com/U447IH35/as/bt3z3gw7zjvppsfg9hqpnxn/1814002-847__1?auto=webp&format=jpg&width=350&height=350&fit=bounds&canvas=350,350",
-        "item_product_buyable": true,
-        "Purity_attr": [
-          "999.0 Fine Silver"
-        ],
-        "item_number": "1814002",
-        "item_product_primary_image": "https://bfasset.costco-static.com/U447IH35/as/bt3z3gw7zjvppsfg9hqpnxn/1814002-847__1?auto=webp&format=jpg&width=350&height=350&fit=bounds&canvas=350,350",
-        "item_location_pricing_listPrice": 529.99,
-        "item_manufacturing_skus": [
-          "4000001814002"
-        ],
-        "item_as400_category": "LLS",
-        "item_product_status_published": true,
-        "Brand_attr": [
-          "PAMP"
-        ],
-        "item_product_review_eligible": true,
-        "name": "10 oz Silver Bar PAMP Lady of Liberty",
-        "item_product_price_in_cart_only": "1",
-        "item_image_swatchable": false,
-        "id": "1814002!item.en-US",
-        "item_product_status_backorderqty": 0,
-        "item_backorderflag": 0,
-        "item_product_status_backorderflag": 0,
-        "item_startDate": "2025-03-21T00:00:00Z",
-        "item_review_count": 0,
-        "item_product_review_count": 1196,
-        "item_rating_average_value": 0,
-        "item_backorderqty": 0,
-        "isFutureDate": false,
-        "deliveryStatus": "in stock",
-        "item_location_availability": "in stock",
-        "item_location_stockStatus": "in stock",
-        "item_location_itemNumber": "1814002",
-        "item_location_locationNumber": "847_0-edi",
-        "item_location_fulfillment_restrictions_minQty": "1",
-        "item_location_fulfillment_restrictions_maxQty": "10",
-        "item_location_currencyCode": "USD",
-        "hasSingleSku": true,
-        "minSalePrice": 529.99,
-        "maxSalePrice": 529.99,
-        "isItemInStock": true,
-        "images": [
-          {
-            "item_collateral_primaryimage": "https://bfasset.costco-static.com/U447IH35/as/bt3z3gw7zjvppsfg9hqpnxn/1814002-847__1?auto=webp&format=jpg&width=350&height=350&fit=bounds&canvas=350,350"
-          }
-        ]
-      },
-      {
-        "Precious_Metal_Form_attr": [
-          "Silver Bar"
-        ],
-        "item_product_name": "10 oz Silver Bar PAMP Good Luck Dragon",
-        "item_fsa_eligible": false,
-        "item_product_marketing_features": [
-          "Limit of 1 Transaction Per Membership, with a Maximum of 10 Units Per 24 Hours;\n10 oz Silver Bar;\nItem is Non-Refundable;\nItem is Not Eligible for Price Adjustments"
-        ],
-        "item_buyable": true,
-        "item_chdi_eligible": false,
-        "content_type": [
-          "product"
-        ],
-        "item_short_description": "10 oz Silver Bar PAMP Good Luck Dragon",
-        "item_ratings": 4.763299942016602,
-        "item_status_published": true,
-        "item_eligible_for_review": "true",
-        "item_searchable": true,
-        "item_disponzeroinv": false,
-        "item_review_ratings": "4.763299942016602",
-        "item_program_eligibility": [
-          "SiteControlledInventory",
-          "Standard",
-          "ShipIt"
-        ],
-        "Edge_Design_attr": [
-          "Smooth"
-        ],
-        "categoryPath_ss": [
-          "/precious-metals.html",
-          "/jewelry.html"
-        ],
-        "item_location_pricing_pricePerUnit_price": 529.99,
-        "item_as400_department": "35",
-        "description": "10 oz Silver Bar PAMP Good Luck Dragon",
-        "item_rating_value": [
-          "1 & Up",
-          "2 & Up",
-          "3 & Up",
-          "4 & Up"
-        ],
-        "item_product_short_description": "10 oz Silver Bar PAMP Good Luck Dragon",
-        "Metal_Weight_attr": [
-          "10 Troy Ounce"
-        ],
-        "item_location_pricing_salePrice": 529.99,
-        "Series_attr": [
-          "Good Luck"
-        ],
-        "item_product_marketing_statement": "",
-        "item_variableweight": false,
-        "item_member_only": true,
-        "item_collateral_primaryimage": "https://bfasset.costco-static.com/U447IH35/as/vq2pjfk9rtw6h8zwbbpjv3/4000389891-847__1?auto=webp&format=jpg&width=350&height=350&fit=bounds&canvas=350,350",
-        "item_product_comparable": true,
-        "group_id": "4000389891",
-        "item_classification_itemclass": "Standard",
-        "item_product_status_disponzeroinv": false,
-        "item_product_image_swatchable": false,
-        "item_comparable": true,
-        "item_name": "10 oz Silver Bar PAMP Good Luck Dragon",
-        "image": "https://bfasset.costco-static.com/U447IH35/as/vq2pjfk9rtw6h8zwbbpjv3/4000389891-847__1?auto=webp&format=jpg&width=350&height=350&fit=bounds&canvas=350,350",
-        "item_product_buyable": true,
-        "Purity_attr": [
-          "999.0 Fine Silver"
-        ],
-        "item_number": "1952157",
-        "item_product_primary_image": "https://bfasset.costco-static.com/U447IH35/as/vq2pjfk9rtw6h8zwbbpjv3/4000389891-847__1?auto=webp&format=jpg&width=350&height=350&fit=bounds&canvas=350,350",
-        "item_location_pricing_listPrice": 529.99,
-        "item_manufacturing_skus": [
-          "4000001952157"
-        ],
-        "item_as400_category": "LLS",
-        "item_product_status_published": true,
-        "Brand_attr": [
-          "PAMP"
-        ],
-        "item_product_review_eligible": true,
-        "name": "10 oz Silver Bar PAMP Good Luck Dragon",
-        "item_product_price_in_cart_only": "1",
-        "item_image_swatchable": false,
-        "id": "1952157!item.en-US",
-        "item_product_status_backorderqty": 0,
-        "item_backorderflag": 0,
-        "item_product_status_backorderflag": 0,
-        "item_startDate": "2025-08-25T00:00:00Z",
-        "item_review_count": 0,
-        "item_product_review_count": 300,
-        "item_rating_average_value": 0,
-        "item_backorderqty": 0,
-        "isFutureDate": false,
-        "deliveryStatus": "out of stock",
-        "item_location_availability": "in stock",
-        "item_location_stockStatus": "in stock",
-        "item_location_itemNumber": "1952157",
-        "item_location_locationNumber": "423-wh",
-        "item_location_fulfillment_restrictions_minQty": "1",
-        "item_location_fulfillment_restrictions_maxQty": "10",
-        "item_location_currencyCode": "USD",
-        "hasSingleSku": true,
-        "minSalePrice": 529.99,
-        "maxSalePrice": 529.99,
-        "isItemInStock": true,
-        "images": [
-          {
-            "item_collateral_primaryimage": "https://bfasset.costco-static.com/U447IH35/as/vq2pjfk9rtw6h8zwbbpjv3/4000389891-847__1?auto=webp&format=jpg&width=350&height=350&fit=bounds&canvas=350,350"
-          }
-        ]
-      },
       {
         "Precious_Metal_Form_attr": [
           "Gold Bar"
@@ -603,29 +269,22 @@
         ]
       }
     ],
-    "numFound": 5,
+    "numFound": 2,
     "start": 0,
     "numFoundExact": true
   },
   "responseHeader": {
     "zkConnected": true,
-    "QTime": 51,
-    "totalTime": 212,
+    "QTime": 42,
+    "totalTime": 157,
     "status": 0
   },
   "facets": {
     "item_location_pricing_salePrice": {
       "buckets": [
         {
-          "val": "$500 to $1000",
-          "count": 2,
-          "low": "500",
-          "high": "1000",
-          "display_order": "5"
-        },
-        {
           "val": "$2,000 to $5,000",
-          "count": 3,
+          "count": 2,
           "low": "2000",
           "high": "5000",
           "display_order": "7"
@@ -647,15 +306,15 @@
       "buckets": [
         {
           "val": "ShipIt",
-          "count": 5
+          "count": 2
         },
         {
           "val": "SiteControlledInventory",
-          "count": 5
+          "count": 2
         },
         {
           "val": "Standard",
-          "count": 5
+          "count": 2
         }
       ],
       "label": "Program Eligibility",
@@ -671,7 +330,7 @@
       "buckets": [
         {
           "val": "in stock",
-          "count": 5
+          "count": 2
         }
       ]
     },
@@ -679,19 +338,19 @@
       "buckets": [
         {
           "val": "4 & Up",
-          "count": 5
+          "count": 2
         },
         {
           "val": "3 & Up",
-          "count": 5
+          "count": 2
         },
         {
           "val": "2 & Up",
-          "count": 5
+          "count": 2
         },
         {
           "val": "1 & Up",
-          "count": 5
+          "count": 2
         }
       ],
       "label": "Customer Reviews",
@@ -703,7 +362,7 @@
       "buckets": [
         {
           "val": "PAMP",
-          "count": 5
+          "count": 2
         }
       ],
       "label": "Brand",
@@ -713,14 +372,6 @@
     },
     "Purity_attr": {
       "buckets": [
-        {
-          "val": ".9999 Pure Gold (24k)",
-          "count": 1
-        },
-        {
-          "val": "999.0 Fine Silver",
-          "count": 2
-        },
         {
           "val": "999.9 Pure Gold (24k)",
           "count": 2
@@ -735,10 +386,6 @@
       "buckets": [
         {
           "val": "Gold Bar",
-          "count": 3
-        },
-        {
-          "val": "Silver Bar",
           "count": 2
         }
       ],
@@ -751,7 +398,7 @@
       "buckets": [
         {
           "val": "Smooth",
-          "count": 5
+          "count": 2
         }
       ],
       "label": "Edge Design",

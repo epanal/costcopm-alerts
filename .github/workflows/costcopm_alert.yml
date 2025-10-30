@@ -14,7 +14,7 @@ jobs:
       BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
       CI: "1"
       BROWSER: webkit          # <- use WebKit on CI
-      HEADLESS: "true"
+      HEADLESS: true
 
     steps:
       - name: Checkout repo
