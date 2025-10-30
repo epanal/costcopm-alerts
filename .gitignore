@@ -10,3 +10,5 @@ costco.png
 # Playwright artifacts (optional)
 playwright-report/
 test-results/
+
+page.html
