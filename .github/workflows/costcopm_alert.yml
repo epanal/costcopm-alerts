@@ -3,41 +3,69 @@ name: Costco PM Alert
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes (UTC)
+    # Runs every 30 minutes (GitHub Actions uses UTC)
+    - cron: "*/30 * * * *"
 
 jobs:
   run-alert:
     runs-on: ubuntu-latest
+
+    # Keep secrets out of logs; set your two Bluesky creds in repo Settings → Secrets → Actions
     env:
       CI: "true"
-      # Match your local run:
-      BROWSER: "webkit"              # your script already defaults to webkit on CI, but explicit is fine
-      HEADLESS: "true"               # prefer headless on CI; use xvfb if you really need false
-      POST_STATUS_UPDATES: "true"
+      BROWSER: "webkit"                 # your script defaults to webkit on CI, this is just explicit
+      HEADLESS: "true"                  # headless is most reliable in CI
+      POST_STATUS_UPDATES: "true"       # post even when OOS
+      # Optional: post even if we couldn't determine status (no JSON / consent wall, etc.)
+      ALWAYS_POST_WHEN_INCONCLUSIVE: "true"
       BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
       BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          # if you don’t have a requirements.txt, install directly:
-          # pip install playwright python-dotenv atproto
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install playwright python-dotenv atproto
+          fi
 
-      - name: Install Playwright browsers
+      - name: Install Playwright (webkit) + system deps
         run: |
           python -m playwright install --with-deps webkit
 
-      # If you *must* run headful on CI, wrap with xvfb:
+      # If you ever need headful (HEADLESS=false), wrap the run step with xvfb-run:
       # - name: Run script (headful)
       #   run: xvfb-run -a python costcopm_alert.py
 
-      - name: Run script
+      - name: Run Costco PM alert
         run: python costcopm_alert.py
+
+      # Save artifacts so you can inspect failures (screenshot, captured JSON, HTML)
+      - name: Upload artifacts
+        if: always()  # always upload, even if the job fails
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-artifacts
+          path: |
+            costco.png
+            api-sample.json
+            page.html
+          if-no-files-found: ignore

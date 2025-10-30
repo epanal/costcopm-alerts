@@ -8,9 +8,11 @@ Flow (local & CI):
   4) Post summary to Bluesky (with screenshot if available).
 
 Env:
-  CI=true/false                -> toggles minor stealth flags and default browser (webkit on CI)
+  CI=true/false
   BROWSER=webkit|firefox|chrome|chromium
   HEADLESS=true|false
+  POST_STATUS_UPDATES=true|false            -> post when OOS
+  ALWAYS_POST_WHEN_INCONCLUSIVE=true|false  -> post even if signal is inconclusive (no JSON)
   BSKY_HANDLE=you.bsky.social
   BSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
 """
@@ -32,19 +34,20 @@ from atproto import Client, models
 # ------------------------------------------------------------------------------
 load_dotenv()
 
-IS_CI = bool(os.getenv("CI"))
+IS_CI = str(os.getenv("CI", "")).lower() in {"1", "true", "yes", "on"}
 USE_BROWSER = os.getenv("BROWSER", "webkit" if IS_CI else "firefox").lower()
 HEADLESS = os.getenv("HEADLESS", "true").lower() in {"1", "true", "yes", "on"}
 
-# Post status updates even when OOS?
-POST_STATUS_UPDATES = os.getenv("POST_STATUS_UPDATES", "false").lower() in {"1","true","yes","on"}
-
-# Bluesky creds
+# Bluesky creds (required)
 BSKY_HANDLE = os.getenv("BSKY_HANDLE")
 BSKY_APP_PASSWORD = os.getenv("BSKY_APP_PASSWORD")
 if not BSKY_HANDLE or not BSKY_APP_PASSWORD:
-    builtins.print("ERROR: BSKY_HANDLE or BSKY_APP_PASSWORD missing in .env")
+    builtins.print("ERROR: BSKY_HANDLE or BSKY_APP_PASSWORD missing in env/.env")
     sys.exit(1)
+
+# Posting toggles
+POST_STATUS_UPDATES = os.getenv("POST_STATUS_UPDATES", "false").lower() in {"1","true","yes","on"}
+ALWAYS_POST_WHEN_INCONCLUSIVE = os.getenv("ALWAYS_POST_WHEN_INCONCLUSIVE", "false").lower() in {"1","true","yes","on"}
 
 URL = "https://www.costco.com/precious-metals.html"
 API_JSON_PATH = "api-sample.json"
@@ -58,6 +61,15 @@ OOS_PATTERNS = [
     "did not match any products",
 ]
 IN_STOCK_TERMS = ["gold bar", "gold bars", "silver bar", "silver bars", "precious metals"]
+
+# ------------------------------------------------------------------------------
+# Debug env print
+# ------------------------------------------------------------------------------
+builtins.print(
+    f"[env] CI={IS_CI} BROWSER={USE_BROWSER} HEADLESS={HEADLESS} "
+    f"POST_STATUS_UPDATES={POST_STATUS_UPDATES} "
+    f"ALWAYS_POST_WHEN_INCONCLUSIVE={ALWAYS_POST_WHEN_INCONCLUSIVE}"
+)
 
 # ------------------------------------------------------------------------------
 # Bluesky facets (hashtags + links)
@@ -94,26 +106,33 @@ def build_facets(text: str):
 # JSON parsing (metal counts + in-stock)
 # ------------------------------------------------------------------------------
 def _detect_metal(doc: dict) -> str:
+    # Use form/purity/name to be robust
     forms = " ".join(doc.get("Precious_Metal_Form_attr") or []).lower()
     purity = " ".join(doc.get("Purity_attr") or []).lower()
-    if "gold" in forms or "gold" in purity:
+    name   = (doc.get("item_product_name") or doc.get("name") or "").lower()
+    hay = " ".join([forms, purity, name])
+    if "gold" in hay:
         return "gold"
-    if "silver" in forms or "silver" in purity:
+    if "silver" in hay:
         return "silver"
     return "other"
 
 
 def _is_in_stock(doc: dict) -> bool:
+    # Prefer explicit boolean; otherwise stockStatus/availability/deliveryStatus
     if "isItemInStock" in doc:
         try:
             return bool(doc["isItemInStock"])
         except Exception:
             pass
-    status = (doc.get("item_location_stockStatus") or doc.get("deliveryStatus") or "").lower()
+    status = (doc.get("item_location_stockStatus")
+              or doc.get("item_location_availability")
+              or doc.get("deliveryStatus")
+              or "").strip().lower()
     return status in {"in stock", "instock", "available"}
 
 
-def parse_api_json(path: str) -> dict:
+def parse_api_json(path: str) -> dict | None:
     """Return summary dict with numFound, counts by metal, and in-stock breakdown."""
     if not os.path.exists(path):
         return None
@@ -152,7 +171,7 @@ def build_text_from_summary(summary: dict) -> str:
     hst = now.astimezone(ZoneInfo("Pacific/Honolulu"))
     pt  = now.astimezone(ZoneInfo("America/Los_Angeles"))
     et  = now.astimezone(ZoneInfo("America/New_York"))
-    ts  = f"{hst.strftime('%I:%M %p %Z')} / {pt.strftime('%I:%M %Z')} / {et.strftime('%I:%M %Z')}"
+    ts  = f"{hst.strftime('%I:%M %p %Z')} / {pt.strftime('%I:%M %p %Z')} / {et.strftime('%I:%M %p %Z')}"
 
     gold = summary["counts"].get("gold", 0)
     silver = summary["counts"].get("silver", 0)
@@ -200,104 +219,131 @@ def post_to_bluesky(image_path: str | None, text: str) -> None:
 # Browser launcher (regenerates api-sample.json via response hook)
 # ------------------------------------------------------------------------------
 def launch_browser(p):
-    # Choose engine + UA
-    args = []
-    if USE_BROWSER in ("chromium", "chrome"):
-        if IS_CI:
-            args += ["--no-sandbox", "--disable-dev-shm-usage"]
-        browser = (
-            p.chromium.launch(channel="chrome", headless=HEADLESS, args=args)
-            if USE_BROWSER == "chrome"
-            else p.chromium.launch(headless=HEADLESS, args=args)
+    try:
+        # Choose engine + UA
+        args = []
+        if USE_BROWSER in ("chromium", "chrome"):
+            if IS_CI:
+                args += ["--no-sandbox", "--disable-dev-shm-usage"]
+            browser = (
+                p.chromium.launch(channel="chrome", headless=HEADLESS, args=args)
+                if USE_BROWSER == "chrome"
+                else p.chromium.launch(headless=HEADLESS, args=args)
+            )
+            ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        elif USE_BROWSER == "firefox":
+            if IS_CI:
+                args += ["--no-sandbox", "--disable-dev-shm-usage"]
+            browser = p.firefox.launch(headless=HEADLESS, args=args)
+            ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:129.0) Gecko/20100101 Firefox/129.0"
+        else:
+            # webkit (default on CI)
+            browser = p.webkit.launch(headless=HEADLESS, args=[])
+            ua = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15")
+
+        context = browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent=ua,
+            ignore_https_errors=True,
+            locale="en-US",
+            timezone_id="America/Los_Angeles",
         )
-        ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-    elif USE_BROWSER == "firefox":
+        page = context.new_page()
+
+        # Safe console handlers
+        def _console(msg):
+            try:
+                builtins.print(f"[console][{msg.type()}] {msg.text()}")
+            except Exception as e:
+                builtins.print(f"[console][error] {e!r}")
+
+        def _pageerror(err):
+            try:
+                builtins.print(f"[pageerror] {err}")
+            except Exception as e:
+                builtins.print(f"[pageerror][error] {e!r}")
+
+        page.on("console", _console)
+        page.on("pageerror", _pageerror)
+
+        # Headers + minor stealth tweaks on CI
         if IS_CI:
-            args += ["--no-sandbox", "--disable-dev-shm-usage"]
-        browser = p.firefox.launch(headless=HEADLESS, args=args)
-        ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:129.0) Gecko/20100101 Firefox/129.0"
-    else:
-        # WebKit tends to be most reliable on CI for costco.com
-        browser = p.webkit.launch(headless=HEADLESS, args=[])
-        ua = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-              "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15")
+            context.set_extra_http_headers({
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Upgrade-Insecure-Requests": "1",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "Referer": "https://www.costco.com/",
+            })
+            page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:() => undefined});")
+            page.add_init_script("Object.defineProperty(navigator,'plugins',{get:() => [1,2,3]});")
+            page.add_init_script("Object.defineProperty(navigator,'languages',{get:() => ['en-US','en']});")
 
-    context = browser.new_context(
-        viewport={"width": 1920, "height": 1080},
-        user_agent=ua,
-        ignore_https_errors=True,
-        locale="en-US",
-        timezone_id="America/Los_Angeles",
-    )
-    page = context.new_page()
-
-    # Safe console handlers
-    def _console(msg):
-        try:
-            builtins.print(f"[console][{msg.type()}] {msg.text()}")
-        except Exception as e:
-            builtins.print(f"[console][error] {e!r}")
-
-    def _pageerror(err):
-        try:
-            builtins.print(f"[pageerror] {err}")
-        except Exception as e:
-            builtins.print(f"[pageerror][error] {e!r}")
-
-    page.on("console", _console)
-    page.on("pageerror", _pageerror)
-
-    # Headers + minor stealth tweaks on CI
-    if IS_CI:
-        context.set_extra_http_headers({
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Upgrade-Insecure-Requests": "1",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-            "Referer": "https://www.costco.com/",
-        })
-        page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:() => undefined});")
-        page.add_init_script("Object.defineProperty(navigator,'plugins',{get:() => [1,2,3]});")
-        page.add_init_script("Object.defineProperty(navigator,'languages',{get:() => ['en-US','en']});")
-
-    # Capture the first relevant JSON to api-sample.json on every run
-    def _on_response(res):
-        try:
-            ct = (res.headers or {}).get("content-type", "")
-            url = res.url
-            if "application/json" in ct and any(k in url for k in ["search", "product", "catalog", "browse"]):
+        # Capture the first relevant JSON to api-sample.json on every run
+        def _on_response(res):
+            try:
+                headers = res.headers or {}
+                ct = headers.get("content-type", "")
+                url = res.url
+                if "application/json" not in ct:
+                    return
+                if not any(host in url for host in ("search.costco.com", "costco.com")):
+                    return
                 data = res.json()
-                with open(API_JSON_PATH, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2)
-                builtins.print(f"[api] JSON captured from {url[:120]}... -> {API_JSON_PATH}")
-        except Exception:
-            pass
+                looks_like_search = (
+                    isinstance(data, dict)
+                    and ("response" in data)
+                    and isinstance(data["response"], dict)
+                    and "docs" in data["response"]
+                )
+                if looks_like_search:
+                    with open(API_JSON_PATH, "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2)
+                    builtins.print(f"[api] JSON captured from {url[:160]}... -> {API_JSON_PATH}")
+            except Exception:
+                # swallow noisy JSON errors from unrelated endpoints
+                pass
 
-    page.on("response", _on_response)
-    return browser, context, page
+        page.on("response", _on_response)
+        return browser, context, page
+
+    except Exception as e:
+        # Surface the actual launch error instead of returning None
+        raise RuntimeError(f"Failed to launch {USE_BROWSER} (HEADLESS={HEADLESS}, CI={IS_CI}): {e}") from e
 
 # ------------------------------------------------------------------------------
 # Main flow
 # ------------------------------------------------------------------------------
 def check_stock():
     with sync_playwright() as p:
-        browser = None
+        builtins.print("Launching browser...")
+        res = launch_browser(p)
+        if not isinstance(res, tuple) or len(res) != 3:
+            raise RuntimeError(
+                "launch_browser() did not return (browser, context, page). "
+                "Ensure it ends with `return browser, context, page`."
+            )
+        browser, context, page = res
+
+        builtins.print("Loading Costco...")
+        resp, last_err = None, None
+
         try:
-            builtins.print("Launching browser...")
-            browser, context, page = launch_browser(p)
-
-            builtins.print("Loading Costco...")
-            resp, last_err = None, None
-
             if IS_CI:
-                # On CI, keep it simple; we just need navigation to start to capture JSON
+                # DOM ready is safer for CI (commit can be too early)
+                resp = page.goto(URL, wait_until="domcontentloaded", timeout=30_000)
+                # Wait up to 10s for Lucidworks JSON
                 try:
-                    resp = page.goto(URL, wait_until="commit", timeout=30_000)
-                except Exception as e:
-                    last_err = e
-                    builtins.print(f"[goto] commit failed on CI: {e}")
+                    page.wait_for_response(
+                        lambda r: ("search.costco.com" in r.url)
+                                  and ("application/json" in (r.headers or {}).get("content-type", "")),
+                        timeout=10_000,
+                    )
+                except Exception:
+                    builtins.print("[info] No Lucidworks JSON observed within 10s on CI")
             else:
                 # Locally, progressively relax wait conditions
                 for wait in ("load", "domcontentloaded", "networkidle"):
@@ -307,147 +353,152 @@ def check_stock():
                     except Exception as e:
                         last_err = e
                         builtins.print(f"[goto] {USE_BROWSER} failed ({wait}): {e}")
+        except Exception as e:
+            last_err = e
+            builtins.print(f"[goto] navigation error: {e}")
 
-            if resp is None:
-                builtins.print(f"[error] Page failed to initiate. Last error: {last_err}")
-                builtins.print("Inconclusive")
-                try: browser.close()
-                except Exception: pass
-                return
+        if resp is None:
+            builtins.print(f"[error] Page failed to initiate. Last error: {last_err}")
+            builtins.print("Inconclusive")
+            try: browser.close()
+            except Exception: pass
+            return
 
-            # Try cookie banner accept if present
+        # Try cookie banner accept if present
+        try:
+            page.locator("#onetrust-accept-btn-handler, button:has-text('Accept All Cookies')").first.click(timeout=2500)
+            builtins.print("[info] Cookie banner accepted")
+        except Exception:
+            pass
+
+        # Brief pause for XHRs/json to arrive; then screenshot and HTML dump
+        try:
+            page.wait_for_timeout(2500)
+        except Exception:
+            pass
+
+        if not page.is_closed():
             try:
-                page.locator("#onetrust-accept-btn-handler, button:has-text('Accept All Cookies')").first.click(timeout=2500)
-                builtins.print("[info] Cookie banner accepted")
+                page.screenshot(path=SCREENSHOT, full_page=True)
+                builtins.print(f"Screenshot saved: {os.path.abspath(SCREENSHOT)}")
+            except Exception as e:
+                builtins.print(f"[warn] screenshot failed: {e}")
+            try:
+                with open("page.html", "w", encoding="utf-8") as f:
+                    f.write(page.content())
+                builtins.print("[debug] HTML dumped to page.html")
+            except Exception as e:
+                builtins.print(f"[warn] html dump failed: {e}")
+
+        # Basic textual fallback signals (if JSON doesn't capture)
+        try:
+            body_preview = page.inner_text("body")[:2000]
+        except Exception:
+            body_preview = ""
+        low = (page.title().lower() + " " + body_preview.lower())
+
+        # Consent/blocked heuristic
+        if any(x in low for x in ("access denied", "request was blocked", "reference #", "problem loading page")):
+            builtins.print("[warn] Possibly blocked/consent wall. See artifacts.")
+            builtins.print("Inconclusive")
+            try: browser.close()
+            except Exception: pass
+            return
+
+        # ---- JSON parse (freshly captured this run) ----
+        summary = None
+        if os.path.exists(API_JSON_PATH):
+            try:
+                summary = parse_api_json(API_JSON_PATH)
+                if summary:
+                    builtins.print(
+                        f"[api-summary] Parsed {summary['numFound']} products → "
+                        f"gold={summary['counts']['gold']} (in {summary['stock']['gold']['in_stock']}), "
+                        f"silver={summary['counts']['silver']} (in {summary['stock']['silver']['in_stock']})"
+                    )
+            except Exception as e:
+                builtins.print(f"[warn] Failed to parse captured JSON: {e}")
+
+        # Fallback check for product tiles (rarely needed if JSON captured)
+        tile_count = 0
+        for sel in ('[data-automation="product-tile"]', '.product-tile', '[data-automation="product-grid"] a'):
+            try:
+                c = page.locator(sel).count()
+                tile_count = max(tile_count, c or 0)
             except Exception:
                 pass
+        builtins.print(f"[debug] tile_count={tile_count}")
 
-            # Wait briefly for XHRs/json to arrive; then screenshot and HTML dump
-            try:
-                page.wait_for_timeout(2500)
-            except Exception:
-                pass
+        is_oos = any(pat in low for pat in OOS_PATTERNS)
+        has_terms = any(term in low for term in IN_STOCK_TERMS)
 
-            if not page.is_closed():
-                try:
-                    page.screenshot(path=SCREENSHOT, full_page=True)
-                    builtins.print(f"Screenshot saved: {os.path.abspath(SCREENSHOT)}")
-                except Exception as e:
-                    builtins.print(f"[warn] screenshot failed: {e}")
-                try:
-                    with open("page.html", "w", encoding="utf-8") as f:
-                        f.write(page.content())
-                    builtins.print("[debug] HTML dumped to page.html")
-                except Exception as e:
-                    builtins.print(f"[warn] html dump failed: {e}")
+        # ---- Decide and post ----
+        if summary:
+            g_in = summary["stock"]["gold"]["in_stock"]
+            s_in = summary["stock"]["silver"]["in_stock"]
+            text = build_text_from_summary(summary)
 
-            # Basic textual fallback signals (if JSON doesn't capture)
-            try:
-                body_preview = page.inner_text("body")[:2000]
-            except Exception:
-                body_preview = ""
-            low = (page.title().lower() + " " + body_preview.lower())
-
-            # Consent/blocked heuristic
-            if any(x in low for x in ("access denied", "request was blocked", "reference #", "problem loading page")):
-                builtins.print("[warn] Possibly blocked/consent wall. See artifacts.")
-                builtins.print("Inconclusive")
-                try: browser.close()
-                except Exception: pass
-                return
-
-            # ---- JSON parse (freshly captured this run) ----
-            summary = None
-            if os.path.exists(API_JSON_PATH):
-                try:
-                    summary = parse_api_json(API_JSON_PATH)
-                    if summary:
-                        builtins.print(
-                            f"[api-summary] Parsed {summary['numFound']} products → "
-                            f"gold={summary['counts']['gold']} (in {summary['stock']['gold']['in_stock']}), "
-                            f"silver={summary['counts']['silver']} (in {summary['stock']['silver']['in_stock']})"
-                        )
-                except Exception as e:
-                    builtins.print(f"[warn] Failed to parse captured JSON: {e}")
-
-            # Fallback check for product tiles (rarely needed if JSON captured)
-            tile_count = 0
-            for sel in ('[data-automation="product-tile"]', '.product-tile', '[data-automation="product-grid"] a'):
-                try:
-                    c = page.locator(sel).count()
-                    tile_count = max(tile_count, c or 0)
-                except Exception:
-                    pass
-            builtins.print(f"[debug] tile_count={tile_count}")
-
-            is_oos = any(pat in low for pat in OOS_PATTERNS)
-            has_terms = any(term in low for term in IN_STOCK_TERMS)
-
-            # ---- Decide and post ----
-            if summary:
-                g_in = summary["stock"]["gold"]["in_stock"]
-                s_in = summary["stock"]["silver"]["in_stock"]
-                text = build_text_from_summary(summary)
-
-                if g_in > 0 or s_in > 0:
-                    builtins.print("IN STOCK DETECTED!")
-                    post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
-                elif is_oos:
-                    builtins.print("Out of stock")
-                    if POST_STATUS_UPDATES:
-                        now = datetime.now()
-                        hst = now.astimezone(ZoneInfo("Pacific/Honolulu"))
-                        pt  = now.astimezone(ZoneInfo("America/Los_Angeles"))
-                        et  = now.astimezone(ZoneInfo("America/New_York"))
-                        ts  = f"{hst.strftime('%I:%M %p %Z')} / {pt.strftime('%I:%M %p %Z')} / {et.strftime('%I:%M %p %Z')}"
-                        text = (
-                            "Costco Precious Metals — status update\n\n"
-                            f"🕓 {ts}\n"
-                            "No items currently in stock.\n"
-                            "https://www.costco.com/precious-metals.html\n\n"
-                            "#Costco #Gold #Silver #CostcoPM"
-                        )
-                        post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
-
-                else:
-                    builtins.print("Out of stock")
-                    if POST_STATUS_UPDATES:
-                        builtins.print("[info] Posting OOS status update to Bluesky")
-                        post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
-
+            if g_in > 0 or s_in > 0:
+                builtins.print("IN STOCK DETECTED!")
+                post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
             else:
-                # No JSON captured? Use weaker heuristics.
-                if tile_count > 0 or has_terms:
-                    builtins.print("IN STOCK DETECTED! (heuristic)")
-                    # Build generic timestamp-only text if no summary exists
+                builtins.print("Out of stock")
+                if POST_STATUS_UPDATES:
+                    builtins.print("[info] Posting OOS status update to Bluesky")
+                    post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
+
+        else:
+            # No JSON captured? Use weaker heuristics.
+            if tile_count > 0 or has_terms:
+                builtins.print("IN STOCK DETECTED! (heuristic)")
+                now = datetime.now()
+                hst = now.astimezone(ZoneInfo("Pacific/Honolulu"))
+                pt  = now.astimezone(ZoneInfo("America/Los_Angeles"))
+                et  = now.astimezone(ZoneInfo("America/New_York"))
+                ts  = f"{hst.strftime('%I:%M %p %Z')} / {pt.strftime('%I:%M %p %Z')} / {et.strftime('%I:%M %p %Z')}"
+                text = (
+                    "🚨 Costco Precious Metals IN STOCK!\n\n"
+                    f"🕓 {ts}\n"
+                    "https://www.costco.com/precious-metals.html\n\n"
+                    "#Costco #Gold #Silver #CostcoPM"
+                )
+                post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
+            elif is_oos:
+                builtins.print("Out of stock")
+                if POST_STATUS_UPDATES:
                     now = datetime.now()
                     hst = now.astimezone(ZoneInfo("Pacific/Honolulu"))
                     pt  = now.astimezone(ZoneInfo("America/Los_Angeles"))
                     et  = now.astimezone(ZoneInfo("America/New_York"))
                     ts  = f"{hst.strftime('%I:%M %p %Z')} / {pt.strftime('%I:%M %p %Z')} / {et.strftime('%I:%M %p %Z')}"
                     text = (
-                        "🚨 Costco Precious Metals IN STOCK!\n\n"
+                        "Costco Precious Metals — status update\n\n"
                         f"🕓 {ts}\n"
+                        "No items currently in stock.\n"
                         "https://www.costco.com/precious-metals.html\n\n"
                         "#Costco #Gold #Silver #CostcoPM"
                     )
                     post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
-                elif is_oos:
-                    builtins.print("Out of stock")
-                else:
-                    builtins.print("Inconclusive")
+            else:
+                builtins.print("Inconclusive")
+                if POST_STATUS_UPDATES and ALWAYS_POST_WHEN_INCONCLUSIVE:
+                    now = datetime.now()
+                    hst = now.astimezone(ZoneInfo("Pacific/Honolulu"))
+                    pt  = now.astimezone(ZoneInfo("America/Los_Angeles"))
+                    et  = now.astimezone(ZoneInfo("America/New_York"))
+                    ts  = f"{hst.strftime('%I:%M %p %Z')} / {pt.strftime('%I:%M %p %Z')} / {et.strftime('%I:%M %p %Z')}"
+                    text = (
+                        "Costco Precious Metals — status update (signal inconclusive)\n\n"
+                        f"🕓 {ts}\n"
+                        "Unable to verify stock status from page payload. Monitoring continues.\n"
+                        "https://www.costco.com/precious-metals.html\n\n"
+                        "#Costco #Gold #Silver #CostcoPM"
+                    )
+                    post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
 
-            try: browser.close()
-            except Exception:
-                pass
-
-        except Exception as e:
-            builtins.print(f"Error: {e}", file=sys.stderr)
-            try:
-                if browser:
-                    browser.close()
-            except Exception:
-                pass
+        try: browser.close()
+        except Exception:
+            pass
 
 
 # ------------------------------------------------------------------------------
