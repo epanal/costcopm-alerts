@@ -1,35 +1,49 @@
 #!/usr/bin/env python3
 """
-Costco Precious Metals → Bluesky Alert (CI-safe, no external fetch hacks)
+Costco Precious Metals → Bluesky + X Alert (CI-safe)
 
 Flow:
   1) Launch Playwright and open the Precious Metals page.
   2) Capture JSON via network hook (fast path).
-  3) If not captured, mine the HAR (works even when API is 401 via normal fetch).
+  3) If not captured, mine the HAR (works on CI even if live API 401s).
   4) If still missing, scrape DOM tiles.
-  5) Post summary to Bluesky (OOS/inconclusive posting is configurable).
+  5) Build a summary and post:
+     - Always to Bluesky.
+     - To X only when allowed (state-change gate + cooldown + monthly cap).
 
 Env:
   CI=true/false
   BROWSER=webkit|firefox|chrome|chromium     (defaults: webkit on CI, firefox locally)
-  HEADLESS=true|false                        (defaults: true)
+  HEADLESS=true|false                        (default: true)
   POST_STATUS_UPDATES=true|false             (post even when OOS)
   ALWAYS_POST_WHEN_INCONCLUSIVE=true|false   (post even when signal is inconclusive)
   BSKY_HANDLE=you.bsky.social
   BSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
+
+  # X (Twitter)
+  POST_TO_X=true|false
+  MAX_X_POSTS_PER_MONTH=450
+  MIN_SECONDS_BETWEEN_X_POSTS=1800
+  TW_CONSUMER_KEY=...
+  TW_CONSUMER_SECRET=...
+  TW_ACCESS_TOKEN=...
+  TW_ACCESS_TOKEN_SECRET=...
 """
 
 import os
 import re
 import sys
 import json
+import time
 import builtins
+from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 from atproto import Client, models
+import tweepy
 
 # ------------------------------------------------------------------------------
 # Env / constants
@@ -51,10 +65,20 @@ if not BSKY_HANDLE or not BSKY_APP_PASSWORD:
 POST_STATUS_UPDATES = os.getenv("POST_STATUS_UPDATES", "false").lower() in {"1","true","yes","on"}
 ALWAYS_POST_WHEN_INCONCLUSIVE = os.getenv("ALWAYS_POST_WHEN_INCONCLUSIVE", "false").lower() in {"1","true","yes","on"}
 
+# X (Twitter) gating + creds
+POST_TO_X = os.getenv("POST_TO_X", "false").lower() in {"1","true","yes","on"}
+MAX_X_POSTS_PER_MONTH = int(os.getenv("MAX_X_POSTS_PER_MONTH", "450"))
+MIN_SECONDS_BETWEEN_X_POSTS = int(os.getenv("MIN_SECONDS_BETWEEN_X_POSTS", "1800"))
+TW_CONSUMER_KEY = os.getenv("TW_CONSUMER_KEY")
+TW_CONSUMER_SECRET = os.getenv("TW_CONSUMER_SECRET")
+TW_ACCESS_TOKEN = os.getenv("TW_ACCESS_TOKEN")
+TW_ACCESS_TOKEN_SECRET = os.getenv("TW_ACCESS_TOKEN_SECRET")
+
 URL = "https://www.costco.com/precious-metals.html"
 API_JSON_PATH = "api-sample.json"
 HAR_PATH = "run.har"
 SCREENSHOT = "costco.png"
+STATE_PATH = Path(".x_post_state.json")
 TIMEOUT = 90_000  # ms
 
 OOS_PATTERNS = [
@@ -70,7 +94,9 @@ IN_STOCK_TERMS = ["gold bar", "gold bars", "silver bar", "silver bars", "preciou
 builtins.print(
     f"[env] CI={IS_CI} BROWSER={USE_BROWSER} HEADLESS={HEADLESS} "
     f"POST_STATUS_UPDATES={POST_STATUS_UPDATES} "
-    f"ALWAYS_POST_WHEN_INCONCLUSIVE={ALWAYS_POST_WHEN_INCONCLUSIVE}"
+    f"ALWAYS_POST_WHEN_INCONCLUSIVE={ALWAYS_POST_WHEN_INCONCLUSIVE} "
+    f"POST_TO_X={POST_TO_X} MAX_X_POSTS_PER_MONTH={MAX_X_POSTS_PER_MONTH} "
+    f"MIN_SECONDS_BETWEEN_X_POSTS={MIN_SECONDS_BETWEEN_X_POSTS}"
 )
 
 # ------------------------------------------------------------------------------
@@ -216,142 +242,6 @@ def extract_api_from_har(har_path: str, out_path: str) -> bool:
         builtins.print(f"[har] parse error: {e}")
         return False
 
-def force_load_images_and_deblur(page) -> None:
-    """Force eager-load of lazy images, strip blur/skeleton styles, and wait for all images to render."""
-    try:
-        # Make all images eager, swap data-src/srcset into src, and nuke common skeleton/blur styles.
-        page.evaluate("""
-        () => {
-          // 1) Kill common skeleton/blur classes & inline filters
-          const killSelectors = [
-            '.skeleton', '.Skeleton', '.shimmer', '.placeholder', '[class*="skeleton"]',
-            '[class*="Shimmer"]', '[style*="filter: blur("]', '[style*="backdrop-filter"]'
-          ];
-          for (const sel of killSelectors) {
-            document.querySelectorAll(sel).forEach(el => {
-              el.style.filter = 'none';
-              el.style.backdropFilter = 'none';
-              el.style.animation = 'none';
-              el.style.opacity = '1';
-            });
-          }
-
-          // 2) Force-load <img> elements
-          const imgs = Array.from(document.images || []);
-          for (const img of imgs) {
-            try {
-              img.loading = 'eager';
-              img.decoding = 'sync';
-              // If site uses data-src / data-srcset, upgrade them
-              const dsrc = img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-lazy');
-              const dsrcset = img.getAttribute('data-srcset');
-              if (dsrcset && !img.srcset) img.srcset = dsrcset;
-              if (dsrc && img.src !== dsrc) img.src = dsrc;
-              // Remove CSS blur on the image itself
-              img.style.filter = 'none';
-              img.style.opacity = '1';
-            } catch(e) {}
-          }
-
-          // 3) Trigger lazy observers (scroll up/down a bit)
-          const nudge = () => {
-            window.scrollBy(0, Math.max(200, innerHeight * 0.8));
-            window.scrollBy(0, -Math.max(150, innerHeight * 0.6));
-          };
-          for (let i=0;i<4;i++) nudge();
-        }
-        """)
-
-        # Progressive scroll to trigger any remaining lazy assets
-        page.evaluate("""
-            () => new Promise(resolve => {
-              let y = 0, steps = 0;
-              const step = () => {
-                window.scrollTo(0, y);
-                y += Math.max(300, innerHeight * 0.9);
-                steps++;
-                if (y >= document.body.scrollHeight || steps > 20) return resolve();
-                setTimeout(step, 120);
-              };
-              step();
-            })
-        """)
-        page.wait_for_timeout(800)
-
-        # Wait until all images are actually decoded (renders un-greyed)
-        page.wait_for_function("""
-            () => {
-              const imgs = Array.from(document.images || []);
-              return imgs.length === 0 || imgs.every(i => i.complete && i.naturalWidth > 0);
-            }
-        """, timeout=7000)
-
-        # One more idle pause
-        try:
-            page.wait_for_load_state("networkidle", timeout=3000)
-        except Exception:
-            pass
-
-        # Back to top for clean capture
-        page.evaluate("window.scrollTo(0, 0)")
-        page.wait_for_timeout(250)
-    except Exception as e:
-        builtins.print(f"[warn] force_load_images_and_deblur failed: {e}")
-
-def take_best_screenshot(page, path: str, *, min_bytes: int = 200_000) -> None:
-    """Try to capture the product grid area first; fallback to full page, with retries."""
-    try:
-        # Ensure the page is visually ready
-        try:
-            page.wait_for_selector(
-                "[data-automation='product-grid'], [data-automation='product-tile'], .product-tile",
-                timeout=10_000
-            )
-        except Exception:
-            pass
-
-        force_load_images_and_deblur(page)
-
-        # Prefer a tight crop of the grid if possible (less header/footer noise)
-        grid = None
-        for sel in ("[data-automation='product-grid']", ".product-grid", "[data-automation='product-tile']"):
-            try:
-                if page.locator(sel).count() > 0:
-                    grid = page.locator(sel).first
-                    break
-            except Exception:
-                pass
-
-        if grid is not None:
-            try:
-                grid.screenshot(path=path)
-            except Exception as e:
-                builtins.print(f"[warn] grid screenshot failed: {e}")
-
-        # If no grid shot saved or it's suspiciously small, take full-page
-        need_full = True
-        try:
-            if os.path.exists(path) and os.path.getsize(path) >= min_bytes:
-                need_full = False
-        except Exception:
-            pass
-
-        if need_full:
-            page.screenshot(path=path, full_page=True)
-            # Retry once if tiny (late lazy-loaders)
-            try:
-                if os.path.getsize(path) < min_bytes:
-                    page.wait_for_timeout(1500)
-                    page.screenshot(path=path, full_page=True)
-            except Exception:
-                pass
-    except Exception as e:
-        builtins.print(f"[warn] take_best_screenshot failed: {e}")
-        try:
-            page.screenshot(path=path, full_page=True)
-        except Exception:
-            pass
-
 # ------------------------------------------------------------------------------
 # DOM scrape fallback
 # ------------------------------------------------------------------------------
@@ -431,7 +321,127 @@ def scrape_dom_summary(page) -> dict | None:
         return None
 
 # ------------------------------------------------------------------------------
-# Text builder + Bluesky
+# Screenshot helpers (force-load images, deblur, and capture)
+# ------------------------------------------------------------------------------
+def force_load_images_and_deblur(page) -> None:
+    """Force eager-load of lazy images, strip blur/skeleton styles, and wait for all images to render."""
+    try:
+        page.evaluate("""
+        () => {
+          const killSelectors = [
+            '.skeleton', '.Skeleton', '.shimmer', '.placeholder', '[class*="skeleton"]',
+            '[class*="Shimmer"]', '[style*="filter: blur("]', '[style*="backdrop-filter"]'
+          ];
+          for (const sel of killSelectors) {
+            document.querySelectorAll(sel).forEach(el => {
+              el.style.filter = 'none';
+              el.style.backdropFilter = 'none';
+              el.style.animation = 'none';
+              el.style.opacity = '1';
+            });
+          }
+          const imgs = Array.from(document.images || []);
+          for (const img of imgs) {
+            try {
+              img.loading = 'eager';
+              img.decoding = 'sync';
+              const dsrc = img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-lazy');
+              const dsrcset = img.getAttribute('data-srcset');
+              if (dsrcset && !img.srcset) img.srcset = dsrcset;
+              if (dsrc && img.src !== dsrc) img.src = dsrc;
+              img.style.filter = 'none';
+              img.style.opacity = '1';
+            } catch(e) {}
+          }
+          const nudge = () => {
+            window.scrollBy(0, Math.max(200, innerHeight * 0.8));
+            window.scrollBy(0, -Math.max(150, innerHeight * 0.6));
+          };
+          for (let i=0;i<4;i++) nudge();
+        }
+        """)
+        page.evaluate("""
+            () => new Promise(resolve => {
+              let y = 0, steps = 0;
+              const step = () => {
+                window.scrollTo(0, y);
+                y += Math.max(300, innerHeight * 0.9);
+                steps++;
+                if (y >= document.body.scrollHeight || steps > 20) return resolve();
+                setTimeout(step, 120);
+              };
+              step();
+            })
+        """)
+        page.wait_for_timeout(800)
+        page.wait_for_function("""
+            () => {
+              const imgs = Array.from(document.images || []);
+              return imgs.length === 0 || imgs.every(i => i.complete && i.naturalWidth > 0);
+            }
+        """, timeout=7000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=3000)
+        except Exception:
+            pass
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(250)
+    except Exception as e:
+        builtins.print(f"[warn] force_load_images_and_deblur failed: {e}")
+
+
+def take_best_screenshot(page, path: str, *, min_bytes: int = 200_000) -> None:
+    """Try to capture the product grid area first; fallback to full page, with retries."""
+    try:
+        try:
+            page.wait_for_selector(
+                "[data-automation='product-grid'], [data-automation='product-tile'], .product-tile",
+                timeout=10_000
+            )
+        except Exception:
+            pass
+
+        force_load_images_and_deblur(page)
+
+        grid = None
+        for sel in ("[data-automation='product-grid']", ".product-grid", "[data-automation='product-tile']"):
+            try:
+                if page.locator(sel).count() > 0:
+                    grid = page.locator(sel).first
+                    break
+            except Exception:
+                pass
+
+        if grid is not None:
+            try:
+                grid.screenshot(path=path)
+            except Exception as e:
+                builtins.print(f"[warn] grid screenshot failed: {e}")
+
+        need_full = True
+        try:
+            if os.path.exists(path) and os.path.getsize(path) >= min_bytes:
+                need_full = False
+        except Exception:
+            pass
+
+        if need_full:
+            page.screenshot(path=path, full_page=True)
+            try:
+                if os.path.getsize(path) < min_bytes:
+                    page.wait_for_timeout(1500)
+                    page.screenshot(path=path, full_page=True)
+            except Exception:
+                pass
+    except Exception as e:
+        builtins.print(f"[warn] take_best_screenshot failed: {e}")
+        try:
+            page.screenshot(path=path, full_page=True)
+        except Exception:
+            pass
+
+# ------------------------------------------------------------------------------
+# Text builder + posting
 # ------------------------------------------------------------------------------
 def build_text_from_summary(summary: dict) -> str:
     now = datetime.now()
@@ -480,6 +490,131 @@ def post_to_bluesky(image_path: str | None, text: str) -> None:
     except Exception as e:
         builtins.print(f"Bluesky post failed: {e}", file=sys.stderr)
 
+# ----- X (Twitter) posting with gating ----------------------------------------
+def _load_state():
+    if STATE_PATH.exists():
+        try: return json.load(open(STATE_PATH, "r", encoding="utf-8"))
+        except Exception: return {}
+    return {}
+
+def _save_state(s):
+    try: json.dump(s, open(STATE_PATH, "w", encoding="utf-8"), indent=2)
+    except Exception: pass
+
+def _instock_set_from_summary(summary: dict) -> set:
+    """Best-effort set of in-stock item identifiers; falls back to counts signature."""
+    # Prefer API JSON docs if present
+    try:
+        with open(API_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        docs = data.get("response", {}).get("docs", [])
+        ids = set()
+        for d in docs:
+            status = (d.get("item_location_stockStatus") or d.get("item_location_availability") or d.get("deliveryStatus") or "").lower()
+            is_in = bool(d.get("isItemInStock")) or status in {"in stock", "instock", "available"}
+            if is_in:
+                ids.add(str(d.get("item_number") or d.get("id") or d.get("name") or ""))
+        if ids:
+            return ids
+    except Exception:
+        pass
+    # Fallback: encode counts
+    c = summary.get("counts", {})
+    s = summary.get("stock", {})
+    key = (c.get("gold",0), c.get("silver",0),
+           s.get("gold",{}).get("in_stock",0), s.get("silver",{}).get("in_stock",0))
+    return {f"counts:{key}"}
+
+def _can_post_to_x_now(summary: dict) -> tuple[bool, str]:
+    if not POST_TO_X:
+        return (False, "POST_TO_X disabled")
+
+    s = _load_state()
+    now = int(time.time())
+    month_key = datetime.utcfromtimestamp(now).strftime("%Y-%m")
+
+    # monthly cap
+    counts = s.get("month_counts", {})
+    used = int(counts.get(month_key, 0))
+    if used >= MAX_X_POSTS_PER_MONTH:
+        return (False, f"month cap reached {used}/{MAX_X_POSTS_PER_MONTH}")
+
+    # cooldown
+    last_ts = int(s.get("last_x_post_ts", 0))
+    if last_ts and (now - last_ts) < MIN_SECONDS_BETWEEN_X_POSTS:
+        return (False, f"cooldown {(now - last_ts)}s < {MIN_SECONDS_BETWEEN_X_POSTS}s")
+
+    # change detection
+    current_ids = _instock_set_from_summary(summary)
+    last_ids = set(s.get("last_instock_ids", []))
+    if current_ids == last_ids:
+        return (False, "no change in in-stock set")
+
+    return (True, "ok")
+
+def _record_x_post(summary: dict):
+    s = _load_state()
+    now = int(time.time())
+    month_key = datetime.utcfromtimestamp(now).strftime("%Y-%m")
+    counts = s.get("month_counts", {})
+    counts[month_key] = int(counts.get(month_key, 0)) + 1
+    s["month_counts"] = counts
+    s["last_x_post_ts"] = now
+    s["last_instock_ids"] = list(_instock_set_from_summary(summary))
+    _save_state(s)
+
+def post_to_x(image_path: str | None, text: str) -> None:
+    """Post to X (Twitter) using OAuth 1.0a user context (Tweepy)."""
+    missing = [k for k,v in {
+        "TW_CONSUMER_KEY": TW_CONSUMER_KEY,
+        "TW_CONSUMER_SECRET": TW_CONSUMER_SECRET,
+        "TW_ACCESS_TOKEN": TW_ACCESS_TOKEN,
+        "TW_ACCESS_TOKEN_SECRET": TW_ACCESS_TOKEN_SECRET,
+    }.items() if not v]
+    if missing:
+        builtins.print(f"[x] Skipping X post; missing creds: {', '.join(missing)}")
+        return
+    try:
+        auth = tweepy.OAuth1UserHandler(
+            TW_CONSUMER_KEY, TW_CONSUMER_SECRET, TW_ACCESS_TOKEN, TW_ACCESS_TOKEN_SECRET
+        )
+        api_v1 = tweepy.API(auth)  # media upload
+        client_v2 = tweepy.Client(
+            consumer_key=TW_CONSUMER_KEY,
+            consumer_secret=TW_CONSUMER_SECRET,
+            access_token=TW_ACCESS_TOKEN,
+            access_token_secret=TW_ACCESS_TOKEN_SECRET
+        )
+
+        media_ids = None
+        if image_path and os.path.exists(image_path):
+            try:
+                media = api_v1.media_upload(filename=image_path)
+                media_ids = [media.media_id_string]
+            except Exception as e:
+                builtins.print(f"[x] media_upload failed: {e}")
+
+        if media_ids:
+            client_v2.create_tweet(text=text, media_ids=media_ids)
+        else:
+            client_v2.create_tweet(text=text)
+        builtins.print("[x] X post sent!")
+    except Exception as e:
+        builtins.print(f"[x] X post failed: {e}", file=sys.stderr)
+
+def post_everywhere(image_path: str | None, text: str, *, summary_for_x: dict | None = None) -> None:
+    # Always Bluesky
+    post_to_bluesky(image_path, text)
+    # X is gated
+    if summary_for_x is None:
+        return
+    ok, reason = _can_post_to_x_now(summary_for_x)
+    if not ok:
+        builtins.print(f"[x] Skip X post: {reason}")
+        return
+    post_to_x(image_path, text)
+    _record_x_post(summary_for_x)
+
 # ------------------------------------------------------------------------------
 # Browser launcher (records HAR)
 # ------------------------------------------------------------------------------
@@ -518,7 +653,7 @@ def launch_browser(p):
         )
         page = context.new_page()
 
-        # Safe console handlers
+        # Console handlers
         def _console(msg):
             try:
                 builtins.print(f"[console][{msg.type()}] {msg.text()}")
@@ -556,76 +691,6 @@ def launch_browser(p):
 
     except Exception as e:
         raise RuntimeError(f"Failed to launch {USE_BROWSER} (HEADLESS={HEADLESS}, CI={IS_CI}): {e}") from e
-
-## Screenshot
-def take_fully_loaded_screenshot(page, path: str, *, min_bytes: int = 200_000) -> None:
-    """Scrolls to trigger lazy-loading, waits for images to load, then captures a full-page screenshot."""
-    try:
-        # 1) Wait for something meaningful on the page
-        try:
-            page.wait_for_selector("[data-automation='product-grid'], [data-automation='product-tile'], .product-tile", timeout=10_000)
-        except Exception:
-            pass
-
-        # 2) Nudge network to settle
-        try:
-            page.wait_for_load_state("networkidle", timeout=5000)
-        except Exception:
-            pass
-
-        # 3) Progressive scroll to trigger lazy images
-        page.evaluate("""
-            () => new Promise(resolve => {
-              let y = 0, steps = 0;
-              const step = () => {
-                window.scrollTo(0, y);
-                y += Math.max(300, innerHeight * 0.9);
-                steps++;
-                if (y >= document.body.scrollHeight || steps > 20) return resolve();
-                setTimeout(step, 120);
-              };
-              step();
-            })
-        """)
-        page.wait_for_timeout(700)
-
-        # 4) Wait for images to finish loading
-        page.wait_for_function("""
-            () => Array.from(document.images || []).every(img => img.complete && img.naturalWidth > 0)
-        """, timeout=7000)
-
-        # 5) One more idle wait
-        try:
-            page.wait_for_load_state("networkidle", timeout=3000)
-        except Exception:
-            pass
-
-        # 6) Return to top for a nicer screenshot
-        try:
-            page.evaluate("window.scrollTo(0, 0)")
-            page.wait_for_timeout(250)
-        except Exception:
-            pass
-
-        # 7) Capture full-page
-        page.screenshot(path=path, full_page=True)
-
-        # 8) If it looks suspiciously small, retry once after another settle
-        try:
-            import os
-            if os.path.exists(path) and os.path.getsize(path) < min_bytes:
-                page.wait_for_timeout(1500)
-                page.screenshot(path=path, full_page=True)
-        except Exception:
-            pass
-
-    except Exception as e:
-        builtins.print(f"[warn] take_fully_loaded_screenshot failed: {e}")
-        # Fallback—still try to save *something*
-        try:
-            page.screenshot(path=path, full_page=True)
-        except Exception:
-            pass
 
 # ------------------------------------------------------------------------------
 # Main flow
@@ -698,7 +763,6 @@ def check_stock():
             except Exception as e:
                 builtins.print(f"[warn] html dump failed: {e}")
 
-
         # Let late XHRs land, then mine HAR if needed
         try:
             page.wait_for_load_state("networkidle", timeout=5000)
@@ -754,19 +818,22 @@ def check_stock():
             g_in = summary["stock"]["gold"]["in_stock"]
             s_in = summary["stock"]["silver"]["in_stock"]
             text = build_text_from_summary(summary)
+            img = SCREENSHOT if os.path.exists(SCREENSHOT) else None
 
             if g_in > 0 or s_in > 0:
                 builtins.print("IN STOCK DETECTED!")
-                post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
+                post_everywhere(img, text, summary_for_x=summary)
             else:
                 builtins.print("Out of stock")
                 if POST_STATUS_UPDATES:
-                    builtins.print("[info] Posting OOS status update to Bluesky")
-                    post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
+                    builtins.print("[info] Posting OOS status update")
+                    post_everywhere(img, text, summary_for_x=summary)
 
         else:
             # No JSON captured? Try DOM scrape before giving up.
             dom_summary = scrape_dom_summary(page)
+            img = SCREENSHOT if os.path.exists(SCREENSHOT) else None
+
             if dom_summary:
                 builtins.print(
                     f"[dom-summary] Parsed {dom_summary['numFound']} tiles → "
@@ -778,12 +845,12 @@ def check_stock():
                 s_in = dom_summary["stock"]["silver"]["in_stock"]
                 if g_in > 0 or s_in > 0:
                     builtins.print("IN STOCK DETECTED! (DOM)")
-                    post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
+                    post_everywhere(img, text, summary_for_x=dom_summary)
                 else:
                     builtins.print("Out of stock (DOM)")
                     if POST_STATUS_UPDATES:
-                        builtins.print("[info] Posting OOS status update to Bluesky (DOM)")
-                        post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
+                        builtins.print("[info] Posting OOS status update (DOM)")
+                        post_everywhere(img, text, summary_for_x=dom_summary)
             else:
                 # Heuristic fallback
                 if tile_count > 0 or has_terms:
@@ -799,7 +866,7 @@ def check_stock():
                         "https://www.costco.com/precious-metals.html\n\n"
                         "#Costco #Gold #Silver #CostcoPM"
                     )
-                    post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
+                    post_everywhere(img, text, summary_for_x={})
                 elif is_oos:
                     builtins.print("Out of stock")
                     if POST_STATUS_UPDATES:
@@ -815,7 +882,7 @@ def check_stock():
                             "https://www.costco.com/precious-metals.html\n\n"
                             "#Costco #Gold #Silver #CostcoPM"
                         )
-                        post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
+                        post_everywhere(img, text, summary_for_x={})
                 else:
                     builtins.print("Inconclusive")
                     if POST_STATUS_UPDATES and ALWAYS_POST_WHEN_INCONCLUSIVE:
@@ -831,7 +898,7 @@ def check_stock():
                             "https://www.costco.com/precious-metals.html\n\n"
                             "#Costco #Gold #Silver #CostcoPM"
                         )
-                        post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
+                        post_everywhere(img, text, summary_for_x={})
 
         try: browser.close()
         except Exception:
