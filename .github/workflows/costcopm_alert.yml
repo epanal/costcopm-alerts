@@ -44,7 +44,7 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            pip install playwright>=1.45 python-dotenv atproto
+            pip install playwright python-dotenv atproto
           fi
 
       - name: Install Playwright (webkit) + system deps

@@ -141,6 +141,45 @@ def fetch_fusion_via_context(context, save_path: str) -> bool:
         builtins.print(f"[ctx] fetch failed: {e}")
         return False
 
+def fetch_fusion_via_page(page, save_path: str) -> bool:
+    """
+    Plan A+ (strongest): run fetch() inside the page context so the request
+    uses the real browser, cookies, referrer, and CORS.
+    Returns True if it saved a valid payload.
+    """
+    try:
+        url = build_fusion_url()
+
+        # Run inside browser; credentials=include sends cookies if any.
+        js = """
+        async (url) => {
+          try {
+            const resp = await fetch(url, { credentials: "include" });
+            return { ok: resp.ok, status: resp.status, data: await resp.json() };
+          } catch (e) {
+            return { ok: false, status: 0, error: String(e) };
+          }
+        }
+        """
+        result = page.evaluate(js, url)
+        if not result.get("ok"):
+            builtins.print(f'[page] Fusion GET {result.get("status")} {result.get("error","")} for {url[:140]}')
+            return False
+
+        data = result.get("data", {})
+        if not (isinstance(data, dict) and "response" in data and "docs" in data["response"]):
+            builtins.print("[page] JSON did not look like a Fusion search payload")
+            return False
+
+        with open(save_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        builtins.print(f"[page] JSON captured via in-page fetch → {save_path}")
+        return True
+    except Exception as e:
+        builtins.print(f"[page] fetch failed: {e}")
+        return False
+
+
 def fetch_fusion_direct(save_path: str) -> bool:
     """
     Plan B: call Fusion directly. Returns True if it saved a valid payload.
@@ -504,17 +543,22 @@ def check_stock():
         except Exception:
             pass
 
-        # If the browser hook still didn't capture JSON, try Playwright context (cookies) first
+        # If the browser hook still didn't capture JSON, try page fetch → context → direct
         if not os.path.exists(API_JSON_PATH):
-            builtins.print("[info] No captured JSON yet; attempting Fusion fetch via browser context…")
-            ok_ctx = fetch_fusion_via_context(context, API_JSON_PATH)
-            if not ok_ctx:
-                builtins.print("[info] Context fetch failed; attempting plain HTTP fetch…")
-                ok_direct = fetch_fusion_direct(API_JSON_PATH)
-                if ok_direct:
-                    builtins.print("[info] Direct fetch succeeded")
-                else:
-                    builtins.print("[info] Direct fetch did not return a valid payload")
+            builtins.print("[info] No captured JSON yet; attempting Fusion fetch via in-page fetch…")
+            ok_page = fetch_fusion_via_page(page, API_JSON_PATH)
+
+            if not ok_page:
+                builtins.print("[info] In-page fetch failed; attempting Fusion fetch via browser context…")
+                ok_ctx = fetch_fusion_via_context(context, API_JSON_PATH)
+
+                if not ok_ctx:
+                    builtins.print("[info] Context fetch failed; attempting plain HTTP fetch…")
+                    ok_direct = fetch_fusion_direct(API_JSON_PATH)
+                    if ok_direct:
+                        builtins.print("[info] Direct fetch succeeded")
+                    else:
+                        builtins.print("[info] Direct fetch did not return a valid payload")
 
 
         # Basic textual fallback signals (if JSON doesn't capture)
