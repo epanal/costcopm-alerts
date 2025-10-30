@@ -13,3 +13,8 @@ test-results/
 
 page.html
 api-sample.json
+# Runtime artifacts
+api-sample.json
+costco.png
+page.html
+artifacts/

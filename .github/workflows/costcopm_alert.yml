@@ -1,48 +1,64 @@
-# .github/workflows/costcopm_alert.yml
-name: Costco Precious Metals Alert
+name: CostcoPM Alert
 
 on:
-  schedule:
-    - cron: "*/30 * * * *"
   workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 minutes (example)
 
 jobs:
-  check:
+  run:
     runs-on: ubuntu-latest
     env:
+      CI: true
+      BROWSER: webkit
+      HEADLESS: true
+      # Set your Bluesky secrets in the repo settings
       BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
       BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
-      CI: "1"
-      BROWSER: webkit          # <- use WebKit on CI
-      HEADLESS: true
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install playwright python-dotenv atproto
-          python -m playwright install --with-deps webkit   # <- install webkit
+          python -m pip install -U pip
+          pip install -r requirements.txt || true
+          pip install playwright atproto python-dotenv
 
-      - name: Run CostcoPM alert
+      - name: Install Playwright browsers
+        uses: microsoft/playwright-github-action@v1
+        with:
+          with-deps: true
+
+      - name: Run CostcoPM
         run: |
-          echo "Running Costco Precious Metals Alert..."
+          mkdir -p artifacts
+          python -V
           python costcopm_alert.py
+        continue-on-error: true
 
-      # Optional: collect artifacts for debugging
+      - name: List files for debugging
+        if: always()
+        run: |
+          echo "== workspace =="
+          ls -la
+          echo "== artifacts =="
+          ls -la artifacts || true
+          echo "== grep for api-sample.json =="
+          find . -name "api-sample.json" -maxdepth 2 -ls || true
+
       - name: Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: costcopm-debug
           path: |
-            costco.png
-            page.html
+            artifacts/**
             api-sample.json
+            page.html
+            costco.png
+          if-no-files-found: warn
