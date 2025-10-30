@@ -122,9 +122,17 @@ def check_stock():
         try:
             print("Launching browser...")
             if USE_BROWSER == "chromium":
-                browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-                ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                # CI: force HTTP/1.1 to bypass Cloudflare HTTP/2 block
+                chromium_args = [
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-http2",          # THIS LINE FIXES ERR_HTTP2_PROTOCOL_ERROR
+                ]
+                if os.getenv("CI"):
+                    chromium_args.append("--disable-gpu")
+                browser = p.chromium.launch(headless=True, args=chromium_args)
+                ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
             else:
                 browser = p.firefox.launch(headless=True, args=["--no-sandbox"])
                 ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:129.0) Gecko/20100101 Firefox/129.0"
