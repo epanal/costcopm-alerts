@@ -104,6 +104,43 @@ def build_fusion_url():
     }
     return f"{FUSION_BASE}?{urllib.parse.urlencode(params)}"
 
+def fetch_fusion_via_context(context, save_path: str) -> bool:
+    """
+    Plan B (CI-safe): call Fusion through Playwright's request client so cookies/headers match the page.
+    Returns True if it saved a valid payload.
+    """
+    try:
+        # Build the same URL you used earlier; include userLocation and (optionally) loc
+        url = build_fusion_url()  # reuse your existing helper
+
+        # Some endpoints are picky about headers; these are safe & generic.
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://www.costco.com/precious-metals.html",
+            "Origin": "https://www.costco.com",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+        # Use the browser context's request client (shares cookies/session)
+        resp = context.request.get(url, headers=headers, timeout=15000)
+        if not resp.ok:
+            builtins.print(f"[ctx] Fusion GET {resp.status} for {url[:140]}")
+            return False
+
+        data = resp.json()
+        if not (isinstance(data, dict) and "response" in data and "docs" in data["response"]):
+            builtins.print("[ctx] JSON did not look like a Fusion search payload")
+            return False
+
+        with open(save_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        builtins.print(f"[ctx] JSON captured via Playwright context → {save_path}")
+        return True
+
+    except Exception as e:
+        builtins.print(f"[ctx] fetch failed: {e}")
+        return False
+
 def fetch_fusion_direct(save_path: str) -> bool:
     """
     Plan B: call Fusion directly. Returns True if it saved a valid payload.
@@ -467,13 +504,18 @@ def check_stock():
         except Exception:
             pass
 
-        # If the browser hook still didn't capture JSON, try direct HTTP fetch
+        # If the browser hook still didn't capture JSON, try Playwright context (cookies) first
         if not os.path.exists(API_JSON_PATH):
-            builtins.print("[info] No captured JSON yet; attempting direct Fusion fetch…")
-            if fetch_fusion_direct(API_JSON_PATH):
-                builtins.print("[info] Direct fetch succeeded")
-            else:
-                builtins.print("[info] Direct fetch did not return a valid payload")
+            builtins.print("[info] No captured JSON yet; attempting Fusion fetch via browser context…")
+            ok_ctx = fetch_fusion_via_context(context, API_JSON_PATH)
+            if not ok_ctx:
+                builtins.print("[info] Context fetch failed; attempting plain HTTP fetch…")
+                ok_direct = fetch_fusion_direct(API_JSON_PATH)
+                if ok_direct:
+                    builtins.print("[info] Direct fetch succeeded")
+                else:
+                    builtins.print("[info] Direct fetch did not return a valid payload")
+
 
         # Basic textual fallback signals (if JSON doesn't capture)
         try:
