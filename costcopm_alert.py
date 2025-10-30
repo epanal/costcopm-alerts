@@ -21,6 +21,10 @@ import os
 import re
 import sys
 import json
+import time
+import urllib.parse
+import requests
+from requests.adapters import HTTPAdapter, Retry
 import builtins
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -61,6 +65,68 @@ OOS_PATTERNS = [
     "did not match any products",
 ]
 IN_STOCK_TERMS = ["gold bar", "gold bars", "silver bar", "silver bars", "precious metals"]
+
+FUSION_BASE = "https://search.costco.com/api/apps/www_costco_com/query/www_costco_com_navigation"
+
+def _requests_session():
+    s = requests.Session()
+    retries = Retry(
+        total=3, backoff_factor=0.6,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"]
+    )
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.costco.com/precious-metals.html",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    })
+    return s
+
+def build_fusion_url():
+    """
+    A conservative, generic query that returns the Precious Metals tiles.
+    You can further add your loc=… string later if you want exact warehouse filters.
+    """
+    params = {
+        "expoption": "lucidworks",
+        "q": "*:*",
+        "locale": "en-US",
+        "start": "0",
+        "expand": "false",
+        "userLocation": "CA",  # or "US"
+        # You can also pass the giant 'loc=' list you used earlier if desired.
+        # "loc": "653-bd,848-bd,423-wh,..."
+    }
+    return f"{FUSION_BASE}?{urllib.parse.urlencode(params)}"
+
+def fetch_fusion_direct(save_path: str) -> bool:
+    """
+    Plan B: call Fusion directly. Returns True if it saved a valid payload.
+    """
+    try:
+        sess = _requests_session()
+        url = build_fusion_url()
+        r = sess.get(url, timeout=12)
+        if r.status_code != 200:
+            builtins.print(f"[direct] Fusion GET {r.status_code} for {url[:140]}")
+            return False
+        data = r.json()
+        # sanity check
+        if not (isinstance(data, dict) and "response" in data and "docs" in data["response"]):
+            builtins.print("[direct] JSON did not look like a Fusion search payload")
+            return False
+        with open(save_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        builtins.print(f"[direct] JSON captured via HTTP → {save_path}")
+        return True
+    except Exception as e:
+        builtins.print(f"[direct] fetch failed: {e}")
+        return False
 
 # ------------------------------------------------------------------------------
 # Debug env print
@@ -340,7 +406,7 @@ def check_stock():
                     page.wait_for_response(
                         lambda r: ("search.costco.com" in r.url)
                                   and ("application/json" in (r.headers or {}).get("content-type", "")),
-                        timeout=10_000,
+                        timeout=15_000,
                     )
                 except Exception:
                     builtins.print("[info] No Lucidworks JSON observed within 10s on CI")
@@ -389,6 +455,25 @@ def check_stock():
                 builtins.print("[debug] HTML dumped to page.html")
             except Exception as e:
                 builtins.print(f"[warn] html dump failed: {e}")
+
+        # Nudge the SPA to fire requests (helps CI sometimes)
+        try:
+            page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass
+        try:
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(800)
+        except Exception:
+            pass
+
+        # If the browser hook still didn't capture JSON, try direct HTTP fetch
+        if not os.path.exists(API_JSON_PATH):
+            builtins.print("[info] No captured JSON yet; attempting direct Fusion fetch…")
+            if fetch_fusion_direct(API_JSON_PATH):
+                builtins.print("[info] Direct fetch succeeded")
+            else:
+                builtins.print("[info] Direct fetch did not return a valid payload")
 
         # Basic textual fallback signals (if JSON doesn't capture)
         try:
