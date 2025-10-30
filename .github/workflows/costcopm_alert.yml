@@ -14,7 +14,7 @@ jobs:
       HEADLESS: "true"
       # Ensure these match what your script reads:
       BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
-      BSKY_PASSWORD: ${{ secrets.BSKY_PASSWORD }}
+      BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
 
     steps:
       - uses: actions/checkout@v4
