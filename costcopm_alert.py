@@ -216,6 +216,142 @@ def extract_api_from_har(har_path: str, out_path: str) -> bool:
         builtins.print(f"[har] parse error: {e}")
         return False
 
+def force_load_images_and_deblur(page) -> None:
+    """Force eager-load of lazy images, strip blur/skeleton styles, and wait for all images to render."""
+    try:
+        # Make all images eager, swap data-src/srcset into src, and nuke common skeleton/blur styles.
+        page.evaluate("""
+        () => {
+          // 1) Kill common skeleton/blur classes & inline filters
+          const killSelectors = [
+            '.skeleton', '.Skeleton', '.shimmer', '.placeholder', '[class*="skeleton"]',
+            '[class*="Shimmer"]', '[style*="filter: blur("]', '[style*="backdrop-filter"]'
+          ];
+          for (const sel of killSelectors) {
+            document.querySelectorAll(sel).forEach(el => {
+              el.style.filter = 'none';
+              el.style.backdropFilter = 'none';
+              el.style.animation = 'none';
+              el.style.opacity = '1';
+            });
+          }
+
+          // 2) Force-load <img> elements
+          const imgs = Array.from(document.images || []);
+          for (const img of imgs) {
+            try {
+              img.loading = 'eager';
+              img.decoding = 'sync';
+              // If site uses data-src / data-srcset, upgrade them
+              const dsrc = img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-lazy');
+              const dsrcset = img.getAttribute('data-srcset');
+              if (dsrcset && !img.srcset) img.srcset = dsrcset;
+              if (dsrc && img.src !== dsrc) img.src = dsrc;
+              // Remove CSS blur on the image itself
+              img.style.filter = 'none';
+              img.style.opacity = '1';
+            } catch(e) {}
+          }
+
+          // 3) Trigger lazy observers (scroll up/down a bit)
+          const nudge = () => {
+            window.scrollBy(0, Math.max(200, innerHeight * 0.8));
+            window.scrollBy(0, -Math.max(150, innerHeight * 0.6));
+          };
+          for (let i=0;i<4;i++) nudge();
+        }
+        """)
+
+        # Progressive scroll to trigger any remaining lazy assets
+        page.evaluate("""
+            () => new Promise(resolve => {
+              let y = 0, steps = 0;
+              const step = () => {
+                window.scrollTo(0, y);
+                y += Math.max(300, innerHeight * 0.9);
+                steps++;
+                if (y >= document.body.scrollHeight || steps > 20) return resolve();
+                setTimeout(step, 120);
+              };
+              step();
+            })
+        """)
+        page.wait_for_timeout(800)
+
+        # Wait until all images are actually decoded (renders un-greyed)
+        page.wait_for_function("""
+            () => {
+              const imgs = Array.from(document.images || []);
+              return imgs.length === 0 || imgs.every(i => i.complete && i.naturalWidth > 0);
+            }
+        """, timeout=7000)
+
+        # One more idle pause
+        try:
+            page.wait_for_load_state("networkidle", timeout=3000)
+        except Exception:
+            pass
+
+        # Back to top for clean capture
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(250)
+    except Exception as e:
+        builtins.print(f"[warn] force_load_images_and_deblur failed: {e}")
+
+def take_best_screenshot(page, path: str, *, min_bytes: int = 200_000) -> None:
+    """Try to capture the product grid area first; fallback to full page, with retries."""
+    try:
+        # Ensure the page is visually ready
+        try:
+            page.wait_for_selector(
+                "[data-automation='product-grid'], [data-automation='product-tile'], .product-tile",
+                timeout=10_000
+            )
+        except Exception:
+            pass
+
+        force_load_images_and_deblur(page)
+
+        # Prefer a tight crop of the grid if possible (less header/footer noise)
+        grid = None
+        for sel in ("[data-automation='product-grid']", ".product-grid", "[data-automation='product-tile']"):
+            try:
+                if page.locator(sel).count() > 0:
+                    grid = page.locator(sel).first
+                    break
+            except Exception:
+                pass
+
+        if grid is not None:
+            try:
+                grid.screenshot(path=path)
+            except Exception as e:
+                builtins.print(f"[warn] grid screenshot failed: {e}")
+
+        # If no grid shot saved or it's suspiciously small, take full-page
+        need_full = True
+        try:
+            if os.path.exists(path) and os.path.getsize(path) >= min_bytes:
+                need_full = False
+        except Exception:
+            pass
+
+        if need_full:
+            page.screenshot(path=path, full_page=True)
+            # Retry once if tiny (late lazy-loaders)
+            try:
+                if os.path.getsize(path) < min_bytes:
+                    page.wait_for_timeout(1500)
+                    page.screenshot(path=path, full_page=True)
+            except Exception:
+                pass
+    except Exception as e:
+        builtins.print(f"[warn] take_best_screenshot failed: {e}")
+        try:
+            page.screenshot(path=path, full_page=True)
+        except Exception:
+            pass
+
 # ------------------------------------------------------------------------------
 # DOM scrape fallback
 # ------------------------------------------------------------------------------
@@ -551,7 +687,7 @@ def check_stock():
         # Artifacts
         if not page.is_closed():
             try:
-                take_fully_loaded_screenshot(page, SCREENSHOT)
+                take_best_screenshot(page, SCREENSHOT)
                 builtins.print(f"Screenshot saved: {os.path.abspath(SCREENSHOT)}")
             except Exception as e:
                 builtins.print(f"[warn] screenshot failed: {e}")
@@ -561,6 +697,7 @@ def check_stock():
                 builtins.print("[debug] HTML dumped to page.html")
             except Exception as e:
                 builtins.print(f"[warn] html dump failed: {e}")
+
 
         # Let late XHRs land, then mine HAR if needed
         try:
