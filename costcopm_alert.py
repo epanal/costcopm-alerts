@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Costco Precious Metals → Bluesky Alert (+ Screenshot optional)
-Flow (local & CI):
-  1) Launch Playwright browser and load Costco precious metals page.
-  2) Capture Costco's live JSON API to api-sample.json.
-  3) Parse it to count gold/silver and in-stock items.
-  4) Post summary to Bluesky (with screenshot if available).
+Costco Precious Metals → Bluesky Alert (CI-safe, no external fetch hacks)
+
+Flow:
+  1) Launch Playwright and open the Precious Metals page.
+  2) Capture JSON via network hook (fast path).
+  3) If not captured, mine the HAR (works even when API is 401 via normal fetch).
+  4) If still missing, scrape DOM tiles.
+  5) Post summary to Bluesky (OOS/inconclusive posting is configurable).
 
 Env:
   CI=true/false
-  BROWSER=webkit|firefox|chrome|chromium
-  HEADLESS=true|false
-  POST_STATUS_UPDATES=true|false            -> post when OOS
-  ALWAYS_POST_WHEN_INCONCLUSIVE=true|false  -> post even if signal is inconclusive (no JSON)
+  BROWSER=webkit|firefox|chrome|chromium     (defaults: webkit on CI, firefox locally)
+  HEADLESS=true|false                        (defaults: true)
+  POST_STATUS_UPDATES=true|false             (post even when OOS)
+  ALWAYS_POST_WHEN_INCONCLUSIVE=true|false   (post even when signal is inconclusive)
   BSKY_HANDLE=you.bsky.social
   BSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
 """
@@ -21,10 +23,6 @@ import os
 import re
 import sys
 import json
-import time
-import urllib.parse
-import requests
-from requests.adapters import HTTPAdapter, Retry
 import builtins
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -55,258 +53,16 @@ ALWAYS_POST_WHEN_INCONCLUSIVE = os.getenv("ALWAYS_POST_WHEN_INCONCLUSIVE", "fals
 
 URL = "https://www.costco.com/precious-metals.html"
 API_JSON_PATH = "api-sample.json"
+HAR_PATH = "run.har"
 SCREENSHOT = "costco.png"
 TIMEOUT = 90_000  # ms
 
-# Text heuristics for status (fallback if JSON fails)
 OOS_PATTERNS = [
     "we were not able to find a match",
     "no results found",
     "did not match any products",
 ]
 IN_STOCK_TERMS = ["gold bar", "gold bars", "silver bar", "silver bars", "precious metals"]
-
-FUSION_BASE = "https://search.costco.com/api/apps/www_costco_com/query/www_costco_com_navigation"
-
-def _requests_session():
-    s = requests.Session()
-    retries = Retry(
-        total=3, backoff_factor=0.6,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"]
-    )
-    s.mount("https://", HTTPAdapter(max_retries=retries))
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.costco.com/precious-metals.html",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-    })
-    return s
-
-def build_fusion_url():
-    """
-    A conservative, generic query that returns the Precious Metals tiles.
-    You can further add your loc=… string later if you want exact warehouse filters.
-    """
-    params = {
-        "expoption": "lucidworks",
-        "q": "*:*",
-        "locale": "en-US",
-        "start": "0",
-        "expand": "false",
-        "userLocation": "CA",  # or "US"
-        # You can also pass the giant 'loc=' list you used earlier if desired.
-        # "loc": "653-bd,848-bd,423-wh,..."
-    }
-    return f"{FUSION_BASE}?{urllib.parse.urlencode(params)}"
-
-def fetch_fusion_via_context(context, save_path: str) -> bool:
-    """
-    Plan B (CI-safe): call Fusion through Playwright's request client so cookies/headers match the page.
-    Returns True if it saved a valid payload.
-    """
-    try:
-        # Build the same URL you used earlier; include userLocation and (optionally) loc
-        url = build_fusion_url()  # reuse your existing helper
-
-        # Some endpoints are picky about headers; these are safe & generic.
-        headers = {
-            "Accept": "application/json, text/plain, */*",
-            "Referer": "https://www.costco.com/precious-metals.html",
-            "Origin": "https://www.costco.com",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-
-        # Use the browser context's request client (shares cookies/session)
-        resp = context.request.get(url, headers=headers, timeout=15000)
-        if not resp.ok:
-            builtins.print(f"[ctx] Fusion GET {resp.status} for {url[:140]}")
-            return False
-
-        data = resp.json()
-        if not (isinstance(data, dict) and "response" in data and "docs" in data["response"]):
-            builtins.print("[ctx] JSON did not look like a Fusion search payload")
-            return False
-
-        with open(save_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        builtins.print(f"[ctx] JSON captured via Playwright context → {save_path}")
-        return True
-
-    except Exception as e:
-        builtins.print(f"[ctx] fetch failed: {e}")
-        return False
-
-def scrape_dom_summary(page) -> dict | None:
-    """
-    Crawl the rendered product grid to produce a summary like parse_api_json().
-    Returns None if no grid appears in time.
-    """
-    try:
-        # Give the SPA a fighting chance on CI
-        for _ in range(6):
-            try:
-                # Wait for any of the common containers
-                page.wait_for_selector(
-                    "[data-automation='product-tile'], .product-tile, [data-automation='product-grid'] a",
-                    timeout=2500,
-                )
-                break
-            except Exception:
-                # nudge: scroll and idle a bit
-                try:
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                except Exception:
-                    pass
-                page.wait_for_timeout(800)
-        else:
-            # never found a tile container
-            return None
-
-        # Make sure all lazy tiles have had a chance to attach
-        try:
-            page.evaluate("""
-                () => new Promise(r => {
-                    let y = 0, n=0;
-                    const tick = () => {
-                        window.scrollTo(0, y);
-                        y += Math.max(300, innerHeight*0.9);
-                        n += 1;
-                        if (y >= document.body.scrollHeight || n > 12) return r();
-                        setTimeout(tick, 120);
-                    };
-                    tick();
-                })
-            """)
-        except Exception:
-            pass
-        page.wait_for_timeout(700)
-
-        # Collect tiles (union of likely selectors)
-        tiles = []
-        for sel in ("[data-automation='product-tile']", ".product-tile", "[data-automation='product-grid'] a"):
-            try:
-                count = page.locator(sel).count()
-                for i in range(count):
-                    tiles.append((sel, i))
-            except Exception:
-                pass
-
-        if not tiles:
-            return None
-
-        def detect_metal_from_text(t: str) -> str:
-            s = t.lower()
-            if "gold" in s:
-                return "gold"
-            if "silver" in s:
-                return "silver"
-            return "other"
-
-        counts = {"gold": 0, "silver": 0, "other": 0}
-        stock = {
-            "gold": {"in_stock": 0, "out_of_stock": 0},
-            "silver": {"in_stock": 0, "out_of_stock": 0},
-            "other": {"in_stock": 0, "out_of_stock": 0},
-        }
-
-        seen = 0
-        for sel, idx in tiles:
-            loc = page.locator(sel).nth(idx)
-            try:
-                txt = (loc.inner_text(timeout=1000) or "").strip()
-            except Exception:
-                txt = ""
-            if not txt:
-                continue
-
-            m = detect_metal_from_text(txt)
-            counts[m] = counts.get(m, 0) + 1
-            seen += 1
-
-            # crude stock signal from tile text
-            tlow = txt.lower()
-            # many Costco tiles omit "Out of stock"; treat presence of price/“in stock” words as positive
-            in_stock = ("in stock" in tlow) or ("$" in tlow) or ("add to cart" in tlow) or ("price" in tlow)
-            if in_stock:
-                stock[m]["in_stock"] += 1
-            else:
-                stock[m]["out_of_stock"] += 1
-
-        if seen == 0:
-            return None
-
-        return {"numFound": seen, "counts": counts, "stock": stock}
-
-    except Exception:
-        return None
-    
-def fetch_fusion_via_page(page, save_path: str) -> bool:
-    """
-    Plan A+ (strongest): run fetch() inside the page context so the request
-    uses the real browser, cookies, referrer, and CORS.
-    Returns True if it saved a valid payload.
-    """
-    try:
-        url = build_fusion_url()
-
-        # Run inside browser; credentials=include sends cookies if any.
-        js = """
-        async (url) => {
-          try {
-            const resp = await fetch(url, { credentials: "include" });
-            return { ok: resp.ok, status: resp.status, data: await resp.json() };
-          } catch (e) {
-            return { ok: false, status: 0, error: String(e) };
-          }
-        }
-        """
-        result = page.evaluate(js, url)
-        if not result.get("ok"):
-            builtins.print(f'[page] Fusion GET {result.get("status")} {result.get("error","")} for {url[:140]}')
-            return False
-
-        data = result.get("data", {})
-        if not (isinstance(data, dict) and "response" in data and "docs" in data["response"]):
-            builtins.print("[page] JSON did not look like a Fusion search payload")
-            return False
-
-        with open(save_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        builtins.print(f"[page] JSON captured via in-page fetch → {save_path}")
-        return True
-    except Exception as e:
-        builtins.print(f"[page] fetch failed: {e}")
-        return False
-
-
-def fetch_fusion_direct(save_path: str) -> bool:
-    """
-    Plan B: call Fusion directly. Returns True if it saved a valid payload.
-    """
-    try:
-        sess = _requests_session()
-        url = build_fusion_url()
-        r = sess.get(url, timeout=12)
-        if r.status_code != 200:
-            builtins.print(f"[direct] Fusion GET {r.status_code} for {url[:140]}")
-            return False
-        data = r.json()
-        # sanity check
-        if not (isinstance(data, dict) and "response" in data and "docs" in data["response"]):
-            builtins.print("[direct] JSON did not look like a Fusion search payload")
-            return False
-        with open(save_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        builtins.print(f"[direct] JSON captured via HTTP → {save_path}")
-        return True
-    except Exception as e:
-        builtins.print(f"[direct] fetch failed: {e}")
-        return False
 
 # ------------------------------------------------------------------------------
 # Debug env print
@@ -352,20 +108,16 @@ def build_facets(text: str):
 # JSON parsing (metal counts + in-stock)
 # ------------------------------------------------------------------------------
 def _detect_metal(doc: dict) -> str:
-    # Use form/purity/name to be robust
     forms = " ".join(doc.get("Precious_Metal_Form_attr") or []).lower()
     purity = " ".join(doc.get("Purity_attr") or []).lower()
     name   = (doc.get("item_product_name") or doc.get("name") or "").lower()
     hay = " ".join([forms, purity, name])
-    if "gold" in hay:
-        return "gold"
-    if "silver" in hay:
-        return "silver"
+    if "gold" in hay: return "gold"
+    if "silver" in hay: return "silver"
     return "other"
 
 
 def _is_in_stock(doc: dict) -> bool:
-    # Prefer explicit boolean; otherwise stockStatus/availability/deliveryStatus
     if "isItemInStock" in doc:
         try:
             return bool(doc["isItemInStock"])
@@ -379,7 +131,6 @@ def _is_in_stock(doc: dict) -> bool:
 
 
 def parse_api_json(path: str) -> dict | None:
-    """Return summary dict with numFound, counts by metal, and in-stock breakdown."""
     if not os.path.exists(path):
         return None
     with open(path, "r", encoding="utf-8") as f:
@@ -404,15 +155,149 @@ def parse_api_json(path: str) -> dict | None:
         else:
             stock[m]["out_of_stock"] += 1
 
-    return {
-        "numFound": num_found,
-        "counts": counts,
-        "stock": stock,
-    }
+    return {"numFound": num_found, "counts": counts, "stock": stock}
 
+# ------------------------------------------------------------------------------
+# HAR miner (CI-reliable)
+# ------------------------------------------------------------------------------
+def extract_api_from_har(har_path: str, out_path: str) -> bool:
+    """
+    Scan HAR for a Costco/Lucidworks JSON payload with response.docs; write to out_path.
+    Returns True if found.
+    """
+    try:
+        if not os.path.exists(har_path):
+            return False
+        with open(har_path, "r", encoding="utf-8") as f:
+            har = json.load(f)
 
+        entries = har.get("log", {}).get("entries", [])
+        best = None
+
+        for e in entries:
+            res = e.get("response", {})
+            req = e.get("request", {})
+            url = req.get("url", "")
+            # content-type header
+            cth = ""
+            for h in res.get("headers", []):
+                if h.get("name", "").lower() == "content-type":
+                    cth = h.get("value", "")
+                    break
+
+            if "application/json" not in cth:
+                continue
+            if not any(host in url for host in ("search.costco.com", "www.costco.com", "costco.com")):
+                continue
+
+            text = res.get("content", {}).get("text", "")
+            if not text:
+                continue
+            try:
+                data = json.loads(text)
+            except Exception:
+                continue
+
+            if isinstance(data, dict) and "response" in data and isinstance(data["response"], dict) and "docs" in data["response"]:
+                docs = data["response"].get("docs") or []
+                score = len(docs)
+                if not best or score > best[0]:
+                    best = (score, data)
+
+        if best:
+            _, data = best
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            builtins.print(f"[har] JSON extracted from HAR → {out_path}")
+            return True
+
+        return False
+    except Exception as e:
+        builtins.print(f"[har] parse error: {e}")
+        return False
+
+# ------------------------------------------------------------------------------
+# DOM scrape fallback
+# ------------------------------------------------------------------------------
+def scrape_dom_summary(page) -> dict | None:
+    """Produce a summary from rendered tiles (last resort)."""
+    try:
+        # try a few cycles: wait, scroll, idle
+        for _ in range(6):
+            try:
+                page.wait_for_selector(
+                    "[data-automation='product-tile'], .product-tile, [data-automation='product-grid'] a",
+                    timeout=2500,
+                )
+                break
+            except Exception:
+                try:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                except Exception:
+                    pass
+                page.wait_for_timeout(800)
+        else:
+            return None
+
+        # Gather tiles
+        tiles = []
+        for sel in ("[data-automation='product-tile']", ".product-tile", "[data-automation='product-grid'] a"):
+            try:
+                count = page.locator(sel).count()
+                for i in range(count):
+                    tiles.append((sel, i))
+            except Exception:
+                pass
+
+        if not tiles:
+            return None
+
+        def detect_metal_from_text(t: str) -> str:
+            s = t.lower()
+            if "gold" in s: return "gold"
+            if "silver" in s: return "silver"
+            return "other"
+
+        counts = {"gold": 0, "silver": 0, "other": 0}
+        stock = {
+            "gold": {"in_stock": 0, "out_of_stock": 0},
+            "silver": {"in_stock": 0, "out_of_stock": 0},
+            "other": {"in_stock": 0, "out_of_stock": 0},
+        }
+
+        seen = 0
+        for sel, idx in tiles:
+            loc = page.locator(sel).nth(idx)
+            try:
+                txt = (loc.inner_text(timeout=1000) or "").strip()
+            except Exception:
+                txt = ""
+            if not txt:
+                continue
+
+            m = detect_metal_from_text(txt)
+            counts[m] = counts.get(m, 0) + 1
+            seen += 1
+
+            tlow = txt.lower()
+            in_stock = ("in stock" in tlow) or ("$" in tlow) or ("add to cart" in tlow) or ("price" in tlow)
+            if in_stock:
+                stock[m]["in_stock"] += 1
+            else:
+                stock[m]["out_of_stock"] += 1
+
+        if seen == 0:
+            return None
+
+        return {"numFound": seen, "counts": counts, "stock": stock}
+
+    except Exception:
+        return None
+
+# ------------------------------------------------------------------------------
+# Text builder + Bluesky
+# ------------------------------------------------------------------------------
 def build_text_from_summary(summary: dict) -> str:
-    """Compose the Bluesky message (with hashtags + URL) from a parsed summary."""
     now = datetime.now()
     hst = now.astimezone(ZoneInfo("Pacific/Honolulu"))
     pt  = now.astimezone(ZoneInfo("America/Los_Angeles"))
@@ -436,9 +321,7 @@ def build_text_from_summary(summary: dict) -> str:
     )
     return text
 
-# ------------------------------------------------------------------------------
-# Bluesky poster (supports text-only posts if screenshot is absent)
-# ------------------------------------------------------------------------------
+
 def post_to_bluesky(image_path: str | None, text: str) -> None:
     try:
         client = Client()
@@ -462,11 +345,10 @@ def post_to_bluesky(image_path: str | None, text: str) -> None:
         builtins.print(f"Bluesky post failed: {e}", file=sys.stderr)
 
 # ------------------------------------------------------------------------------
-# Browser launcher (regenerates api-sample.json via response hook)
+# Browser launcher (records HAR)
 # ------------------------------------------------------------------------------
 def launch_browser(p):
     try:
-        # Choose engine + UA
         args = []
         if USE_BROWSER in ("chromium", "chrome"):
             if IS_CI:
@@ -484,7 +366,6 @@ def launch_browser(p):
             browser = p.firefox.launch(headless=HEADLESS, args=args)
             ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:129.0) Gecko/20100101 Firefox/129.0"
         else:
-            # webkit (default on CI)
             browser = p.webkit.launch(headless=HEADLESS, args=[])
             ua = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                   "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15")
@@ -495,6 +376,9 @@ def launch_browser(p):
             ignore_https_errors=True,
             locale="en-US",
             timezone_id="America/Los_Angeles",
+            # HAR recording for CI
+            record_har_path=HAR_PATH,
+            record_har_omit_content=False,
         )
         page = context.new_page()
 
@@ -514,50 +398,27 @@ def launch_browser(p):
         page.on("console", _console)
         page.on("pageerror", _pageerror)
 
-        # Headers + minor stealth tweaks on CI
-        if IS_CI:
-            context.set_extra_http_headers({
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Upgrade-Insecure-Requests": "1",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-                "Referer": "https://www.costco.com/",
-            })
-            page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:() => undefined});")
-            page.add_init_script("Object.defineProperty(navigator,'plugins',{get:() => [1,2,3]});")
-            page.add_init_script("Object.defineProperty(navigator,'languages',{get:() => ['en-US','en']});")
-
-        # Capture the first relevant JSON to api-sample.json on every run
+        # Response hook (fast path)
         def _on_response(res):
             try:
-                headers = res.headers or {}
-                ct = headers.get("content-type", "")
+                ct = (res.headers or {}).get("content-type", "")
                 url = res.url
                 if "application/json" not in ct:
                     return
                 if not any(host in url for host in ("search.costco.com", "costco.com")):
                     return
                 data = res.json()
-                looks_like_search = (
-                    isinstance(data, dict)
-                    and ("response" in data)
-                    and isinstance(data["response"], dict)
-                    and "docs" in data["response"]
-                )
-                if looks_like_search:
+                if isinstance(data, dict) and "response" in data and "docs" in data["response"]:
                     with open(API_JSON_PATH, "w", encoding="utf-8") as f:
                         json.dump(data, f, indent=2)
                     builtins.print(f"[api] JSON captured from {url[:160]}... -> {API_JSON_PATH}")
             except Exception:
-                # swallow noisy JSON errors from unrelated endpoints
                 pass
 
         page.on("response", _on_response)
         return browser, context, page
 
     except Exception as e:
-        # Surface the actual launch error instead of returning None
         raise RuntimeError(f"Failed to launch {USE_BROWSER} (HEADLESS={HEADLESS}, CI={IS_CI}): {e}") from e
 
 # ------------------------------------------------------------------------------
@@ -568,10 +429,7 @@ def check_stock():
         builtins.print("Launching browser...")
         res = launch_browser(p)
         if not isinstance(res, tuple) or len(res) != 3:
-            raise RuntimeError(
-                "launch_browser() did not return (browser, context, page). "
-                "Ensure it ends with `return browser, context, page`."
-            )
+            raise RuntimeError("launch_browser() did not return (browser, context, page).")
         browser, context, page = res
 
         builtins.print("Loading Costco...")
@@ -579,19 +437,16 @@ def check_stock():
 
         try:
             if IS_CI:
-                # DOM ready is safer for CI (commit can be too early)
                 resp = page.goto(URL, wait_until="domcontentloaded", timeout=30_000)
-                # Wait up to 10s for Lucidworks JSON
                 try:
                     page.wait_for_response(
-                        lambda r: ("search.costco.com" in r.url)
+                        lambda r: (("search.costco.com" in r.url) or ("costco.com" in r.url))
                                   and ("application/json" in (r.headers or {}).get("content-type", "")),
-                        timeout=15_000,
+                        timeout=20_000,
                     )
                 except Exception:
                     builtins.print("[info] No Lucidworks JSON observed within 10s on CI")
             else:
-                # Locally, progressively relax wait conditions
                 for wait in ("load", "domcontentloaded", "networkidle"):
                     try:
                         resp = page.goto(URL, wait_until=wait, timeout=TIMEOUT)
@@ -610,19 +465,20 @@ def check_stock():
             except Exception: pass
             return
 
-        # Try cookie banner accept if present
+        # Cookie banner
         try:
             page.locator("#onetrust-accept-btn-handler, button:has-text('Accept All Cookies')").first.click(timeout=2500)
             builtins.print("[info] Cookie banner accepted")
         except Exception:
             pass
 
-        # Brief pause for XHRs/json to arrive; then screenshot and HTML dump
+        # Brief settle
         try:
             page.wait_for_timeout(2500)
         except Exception:
             pass
 
+        # Artifacts
         if not page.is_closed():
             try:
                 page.screenshot(path=SCREENSHOT, full_page=True)
@@ -636,51 +492,16 @@ def check_stock():
             except Exception as e:
                 builtins.print(f"[warn] html dump failed: {e}")
 
-        # Nudge the SPA to fire requests (helps CI sometimes)
+        # Let late XHRs land, then mine HAR if needed
         try:
             page.wait_for_load_state("networkidle", timeout=5000)
         except Exception:
             pass
-        try:
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(800)
-        except Exception:
-            pass
-
-        # If the browser hook still didn't capture JSON, try page fetch → context → direct
         if not os.path.exists(API_JSON_PATH):
-            builtins.print("[info] No captured JSON yet; attempting Fusion fetch via in-page fetch…")
-            ok_page = fetch_fusion_via_page(page, API_JSON_PATH)
+            if extract_api_from_har(HAR_PATH, API_JSON_PATH):
+                builtins.print("[info] HAR mining succeeded")
 
-            if not ok_page:
-                builtins.print("[info] In-page fetch failed; attempting Fusion fetch via browser context…")
-                ok_ctx = fetch_fusion_via_context(context, API_JSON_PATH)
-
-                if not ok_ctx:
-                    builtins.print("[info] Context fetch failed; attempting plain HTTP fetch…")
-                    ok_direct = fetch_fusion_direct(API_JSON_PATH)
-                    if ok_direct:
-                        builtins.print("[info] Direct fetch succeeded")
-                    else:
-                        builtins.print("[info] Direct fetch did not return a valid payload")
-
-
-        # Basic textual fallback signals (if JSON doesn't capture)
-        try:
-            body_preview = page.inner_text("body")[:2000]
-        except Exception:
-            body_preview = ""
-        low = (page.title().lower() + " " + body_preview.lower())
-
-        # Consent/blocked heuristic
-        if any(x in low for x in ("access denied", "request was blocked", "reference #", "problem loading page")):
-            builtins.print("[warn] Possibly blocked/consent wall. See artifacts.")
-            builtins.print("Inconclusive")
-            try: browser.close()
-            except Exception: pass
-            return
-
-        # ---- JSON parse (freshly captured this run) ----
+        # Parse JSON if we have it
         summary = None
         if os.path.exists(API_JSON_PATH):
             try:
@@ -694,7 +515,21 @@ def check_stock():
             except Exception as e:
                 builtins.print(f"[warn] Failed to parse captured JSON: {e}")
 
-        # Fallback check for product tiles (rarely needed if JSON captured)
+        # Heuristics / quick signals
+        try:
+            body_preview = page.inner_text("body")[:2000]
+        except Exception:
+            body_preview = ""
+        low = (page.title().lower() + " " + body_preview.lower())
+
+        if any(x in low for x in ("access denied", "request was blocked", "reference #", "problem loading page")):
+            builtins.print("[warn] Possibly blocked/consent wall. See artifacts.")
+            builtins.print("Inconclusive")
+            try: browser.close()
+            except Exception: pass
+            return
+
+        # Fallback: DOM tile count (for posting heuristics if needed)
         tile_count = 0
         for sel in ('[data-automation="product-tile"]', '.product-tile', '[data-automation="product-grid"] a'):
             try:
@@ -707,7 +542,7 @@ def check_stock():
         is_oos = any(pat in low for pat in OOS_PATTERNS)
         has_terms = any(term in low for term in IN_STOCK_TERMS)
 
-        # ---- Decide and post ----
+        # ---- Decide & post ----
         if summary:
             g_in = summary["stock"]["gold"]["in_stock"]
             s_in = summary["stock"]["silver"]["in_stock"]
@@ -723,7 +558,7 @@ def check_stock():
                     post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
 
         else:
-            # No JSON captured? Try a robust DOM scrape before giving up.
+            # No JSON captured? Try DOM scrape before giving up.
             dom_summary = scrape_dom_summary(page)
             if dom_summary:
                 builtins.print(
@@ -743,7 +578,7 @@ def check_stock():
                         builtins.print("[info] Posting OOS status update to Bluesky (DOM)")
                         post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
             else:
-                # Fall back to heuristics from earlier
+                # Heuristic fallback
                 if tile_count > 0 or has_terms:
                     builtins.print("IN STOCK DETECTED! (heuristic)")
                     now = datetime.now()
@@ -794,7 +629,6 @@ def check_stock():
         try: browser.close()
         except Exception:
             pass
-
 
 # ------------------------------------------------------------------------------
 if __name__ == "__main__":
