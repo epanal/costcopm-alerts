@@ -1,36 +1,40 @@
-# .github/workflows/costcopm.yml
-name: CostcoPM Bot
+name: Costco Precious Metals Alert
 
 on:
   schedule:
+    # Every 30 minutes
     - cron: "*/30 * * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:  # allow manual runs
 
 jobs:
-  run-bot:
+  check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+
+    env:
+      BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
+      BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+      CI: true
+      BROWSER: chromium
+      HEADLESS: true
+      # Optional if you only want posts during the day:
+      # POST_ONLY_DURING_DAY: true
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install deps (Playwright + browsers)
+      - name: Install dependencies
         run: |
-          python -m pip install -U pip
-          pip install -r requirements.txt
-          python -m playwright install --with-deps chromium firefox
+          pip install --upgrade pip
+          pip install playwright python-dotenv atproto
+          playwright install --with-deps chromium
 
-      - name: Run CostcoPM
-        env:
-          BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
-          BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
-          BROWSER: chromium
-          CI: "1"
+      - name: Run CostcoPM alert
         run: |
+          echo "Running Costco Precious Metals Alert..."
           python costcopm_alert.py
