@@ -3,7 +3,7 @@ name: CostcoPM Bot
 
 on:
   schedule:
-    - cron: "*/30 * * * *"  # every 30 min (UTC)
+    - cron: "*/30 * * * *"  # every 30 min UTC
   workflow_dispatch: {}
 
 jobs:
@@ -27,15 +27,13 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install -r requirements.txt
-          # If not using a requirements.txt, explicitly:
-          # pip install python-dotenv playwright atproto
-          python -m playwright install --with-deps firefox
+          # Install Chromium browser + dependencies (instead of Firefox)
+          python -m playwright install --with-deps chromium
 
-      - name: Run CostcoPM
+      - name: Run CostcoPM alert
         env:
           BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
           BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
-          # Optional: control posting window inside your script
           POST_ONLY_DURING_DAY: "true"
         run: |
           python costcopm_alert.py
