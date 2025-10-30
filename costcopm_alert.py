@@ -157,13 +157,12 @@ def build_text_from_summary(summary: dict) -> str:
     g_in = summary["stock"]["gold"]["in_stock"]
     s_in = summary["stock"]["silver"]["in_stock"]
 
-    status_line = "🚨 Costco Precious Metals IN STOCK!" if (g_in > 0 or s_in > 0) else "Costco Precious Metals — status update"
+    status_line = "🚨 Costco Precious Metals Listed!" if (g_in > 0 or s_in > 0) else "Costco Precious Metals — status update"
 
     text = (
         f"{status_line}\n\n"
         f"🕓 {ts}\n"
         f"Items found: {total} | Gold: {gold} | Silver: {silver}\n"
-        f"In stock → Gold: {g_in} | Silver: {s_in}\n"
         "https://www.costco.com/precious-metals.html\n\n"
         "#Costco #Gold #Silver #CostcoPM"
     )

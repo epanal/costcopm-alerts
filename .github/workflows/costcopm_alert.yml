@@ -3,18 +3,18 @@ name: CostcoPM Alert
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes (example)
+    - cron: "*/30 * * * *"   # every 30 minutes (UTC)
 
 jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      CI: true
-      BROWSER: webkit
-      HEADLESS: true
-      # Set your Bluesky secrets in the repo settings
+      CI: "true"
+      BROWSER: "webkit"
+      HEADLESS: "true"
+      # Ensure these match what your script reads:
       BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
-      BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+      BSKY_PASSWORD: ${{ secrets.BSKY_PASSWORD }}
 
     steps:
       - uses: actions/checkout@v4
@@ -23,23 +23,25 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install Python deps
         run: |
           python -m pip install -U pip
-          pip install -r requirements.txt || true
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          # ensure these are present even if not pinned
           pip install playwright atproto python-dotenv
 
-      - name: Install Playwright browsers
-        uses: microsoft/playwright-github-action@v1
-        with:
-          with-deps: true
+      # Install WebKit + required system libraries on Ubuntu
+      - name: Install Playwright browsers & system deps (WebKit)
+        run: |
+          python -m playwright install --with-deps webkit
 
       - name: Run CostcoPM
         run: |
           mkdir -p artifacts
           python -V
           python costcopm_alert.py
-        continue-on-error: true
 
       - name: List files for debugging
         if: always()
@@ -49,7 +51,7 @@ jobs:
           echo "== artifacts =="
           ls -la artifacts || true
           echo "== grep for api-sample.json =="
-          find . -name "api-sample.json" -maxdepth 2 -ls || true
+          find . -maxdepth 3 -name "api-sample.json" -ls || true
 
       - name: Upload debug artifacts
         if: always()
@@ -57,8 +59,8 @@ jobs:
         with:
           name: costcopm-debug
           path: |
-            artifacts/**
-            api-sample.json
-            page.html
-            costco.png
+            **/artifacts/**
+            **/api-sample.json
+            **/page.html
+            **/costco.png
           if-no-files-found: warn
