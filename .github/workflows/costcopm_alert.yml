@@ -1,45 +1,41 @@
-name: Costco Precious Metals → Bluesky
+# .github/workflows/costcopm.yml
+name: CostcoPM Bot
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes (UTC)
+    - cron: "*/30 * * * *"  # every 30 min (UTC)
   workflow_dispatch: {}
 
-permissions:
-  contents: read
-
-concurrency:
-  group: costco-bsky-alert
-  cancel-in-progress: true
-
 jobs:
-  check-and-post:
+  run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: costcopm-bot
+      cancel-in-progress: false
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install -U pip
           pip install -r requirements.txt
-          # install all browsers in case we need them
-          playwright install webkit firefox chromium
-          playwright install-deps
+          # If not using a requirements.txt, explicitly:
+          # pip install python-dotenv playwright atproto
+          python -m playwright install --with-deps firefox
 
-      - name: Run Costco → Bluesky alert
+      - name: Run CostcoPM
         env:
-          BLSKY_HANDLE: ${{ vars.BLSKY_HANDLE }}
-          BLSKY_APP_PW: ${{ secrets.BLSKY_APP_PW }}
-          ITEM_KEYWORDS: ${{ vars.ITEM_KEYWORDS }}
-          POST_PREFIX: ${{ vars.POST_PREFIX }}
-          DRY_RUN: ${{ vars.DRY_RUN }}
-          TEST_OOS: ${{ vars.TEST_OOS }}
-          TEST_PREFIX: ${{ vars.TEST_PREFIX }}
+          BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
+          BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+          # Optional: control posting window inside your script
+          POST_ONLY_DURING_DAY: "true"
         run: |
           python costcopm_alert.py

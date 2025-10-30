@@ -5,6 +5,7 @@ venv/
 
 # Environment files (DO NOT commit credentials)
 .env
+costco.png
 
 # Playwright artifacts (optional)
 playwright-report/
