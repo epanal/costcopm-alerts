@@ -1,4 +1,4 @@
-name: CostcoPM Alert
+name: Costco PM Alert
 
 on:
   workflow_dispatch:
@@ -6,13 +6,14 @@ on:
     - cron: "*/30 * * * *"   # every 30 minutes (UTC)
 
 jobs:
-  run:
+  run-alert:
     runs-on: ubuntu-latest
     env:
       CI: "true"
-      BROWSER: "webkit"
-      HEADLESS: "true"
-      # Ensure these match what your script reads:
+      # Match your local run:
+      BROWSER: "webkit"              # your script already defaults to webkit on CI, but explicit is fine
+      HEADLESS: "true"               # prefer headless on CI; use xvfb if you really need false
+      POST_STATUS_UPDATES: "true"
       BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
       BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
 
@@ -23,44 +24,20 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Python deps
+      - name: Install deps
         run: |
-          python -m pip install -U pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
-          # ensure these are present even if not pinned
-          pip install playwright atproto python-dotenv
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # if you don’t have a requirements.txt, install directly:
+          # pip install playwright python-dotenv atproto
 
-      # Install WebKit + required system libraries on Ubuntu
-      - name: Install Playwright browsers & system deps (WebKit)
+      - name: Install Playwright browsers
         run: |
           python -m playwright install --with-deps webkit
 
-      - name: Run CostcoPM
-        run: |
-          mkdir -p artifacts
-          python -V
-          python costcopm_alert.py
+      # If you *must* run headful on CI, wrap with xvfb:
+      # - name: Run script (headful)
+      #   run: xvfb-run -a python costcopm_alert.py
 
-      - name: List files for debugging
-        if: always()
-        run: |
-          echo "== workspace =="
-          ls -la
-          echo "== artifacts =="
-          ls -la artifacts || true
-          echo "== grep for api-sample.json =="
-          find . -maxdepth 3 -name "api-sample.json" -ls || true
-
-      - name: Upload debug artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: costcopm-debug
-          path: |
-            **/artifacts/**
-            **/api-sample.json
-            **/page.html
-            **/costco.png
-          if-no-files-found: warn
+      - name: Run script
+        run: python costcopm_alert.py

@@ -36,6 +36,9 @@ IS_CI = bool(os.getenv("CI"))
 USE_BROWSER = os.getenv("BROWSER", "webkit" if IS_CI else "firefox").lower()
 HEADLESS = os.getenv("HEADLESS", "true").lower() in {"1", "true", "yes", "on"}
 
+# Post status updates even when OOS?
+POST_STATUS_UPDATES = os.getenv("POST_STATUS_UPDATES", "false").lower() in {"1","true","yes","on"}
+
 # Bluesky creds
 BSKY_HANDLE = os.getenv("BSKY_HANDLE")
 BSKY_APP_PASSWORD = os.getenv("BSKY_APP_PASSWORD")
@@ -389,9 +392,29 @@ def check_stock():
                 if g_in > 0 or s_in > 0:
                     builtins.print("IN STOCK DETECTED!")
                     post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
+                elif is_oos:
+                    builtins.print("Out of stock")
+                    if POST_STATUS_UPDATES:
+                        now = datetime.now()
+                        hst = now.astimezone(ZoneInfo("Pacific/Honolulu"))
+                        pt  = now.astimezone(ZoneInfo("America/Los_Angeles"))
+                        et  = now.astimezone(ZoneInfo("America/New_York"))
+                        ts  = f"{hst.strftime('%I:%M %p %Z')} / {pt.strftime('%I:%M %p %Z')} / {et.strftime('%I:%M %p %Z')}"
+                        text = (
+                            "Costco Precious Metals — status update\n\n"
+                            f"🕓 {ts}\n"
+                            "No items currently in stock.\n"
+                            "https://www.costco.com/precious-metals.html\n\n"
+                            "#Costco #Gold #Silver #CostcoPM"
+                        )
+                        post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
+
                 else:
                     builtins.print("Out of stock")
-                    # Optional: you could still post a status update; currently we only log.
+                    if POST_STATUS_UPDATES:
+                        builtins.print("[info] Posting OOS status update to Bluesky")
+                        post_to_bluesky(SCREENSHOT if os.path.exists(SCREENSHOT) else None, text=text)
+
             else:
                 # No JSON captured? Use weaker heuristics.
                 if tile_count > 0 or has_terms:
