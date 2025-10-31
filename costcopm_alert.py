@@ -45,6 +45,7 @@ from playwright.sync_api import sync_playwright
 from atproto import Client, models
 import tweepy
 
+
 # ------------------------------------------------------------------------------
 # Env / constants
 # ------------------------------------------------------------------------------
@@ -391,6 +392,16 @@ def relaunch_webkit(p, headless: bool, ua: str):
 # ------------------------------------------------------------------------------
 # Screenshot helpers (force-load images, deblur, and capture)
 # ------------------------------------------------------------------------------
+def _write_bytes_atomic(path: str, data: bytes) -> None:
+    """Write bytes to path atomically (tmp -> replace)."""
+    p = Path(path)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, p)  # atomic on POSIX
+
 def force_load_images_and_deblur(page) -> None:
     """Force eager-load of lazy images, strip blur/skeleton styles, and wait for all images to render."""
     try:
@@ -459,7 +470,7 @@ def force_load_images_and_deblur(page) -> None:
 
 
 def take_best_screenshot(page, path: str, *, min_bytes: int = 200_000) -> None:
-    """Try to capture the product grid area first; fallback to full page, with retries."""
+    """Try to capture the product grid area first; fallback to full page, with retries (atomic overwrite)."""
     try:
         try:
             page.wait_for_selector(
@@ -471,42 +482,49 @@ def take_best_screenshot(page, path: str, *, min_bytes: int = 200_000) -> None:
 
         force_load_images_and_deblur(page)
 
-        grid = None
+        # 1) Try a tight grid crop first
+        grid_bytes = None
         for sel in ("[data-automation='product-grid']", ".product-grid", "[data-automation='product-tile']"):
             try:
                 if page.locator(sel).count() > 0:
                     grid = page.locator(sel).first
+                    grid_bytes = grid.screenshot(path=None)  # return bytes
                     break
             except Exception:
                 pass
 
-        if grid is not None:
+        wrote = False
+        if grid_bytes:
+            _write_bytes_atomic(path, grid_bytes)
+            wrote = True
             try:
-                grid.screenshot(path=path)
-            except Exception as e:
-                builtins.print(f"[warn] grid screenshot failed: {e}")
+                if os.path.getsize(path) < min_bytes:
+                    wrote = False  # force full-page retry if too tiny
+            except Exception:
+                pass
 
-        need_full = True
-        try:
-            if os.path.exists(path) and os.path.getsize(path) >= min_bytes:
-                need_full = False
-        except Exception:
-            pass
-
-        if need_full:
-            page.screenshot(path=path, full_page=True)
+        # 2) If grid failed or tiny, take full-page
+        if not wrote:
+            full_bytes = page.screenshot(path=None, full_page=True)
+            _write_bytes_atomic(path, full_bytes)
+            # Retry once if still tiny (late lazy-loaders)
             try:
                 if os.path.getsize(path) < min_bytes:
                     page.wait_for_timeout(1500)
-                    page.screenshot(path=path, full_page=True)
+                    full_bytes = page.screenshot(path=None, full_page=True)
+                    _write_bytes_atomic(path, full_bytes)
             except Exception:
                 pass
+
     except Exception as e:
         builtins.print(f"[warn] take_best_screenshot failed: {e}")
         try:
-            page.screenshot(path=path, full_page=True)
+            # Last-ditch: simple full-page write
+            full_bytes = page.screenshot(path=None, full_page=True)
+            _write_bytes_atomic(path, full_bytes)
         except Exception:
             pass
+
 
 # ------------------------------------------------------------------------------
 # Text builder + posting
