@@ -39,6 +39,8 @@ import builtins
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from time import sleep
+from random import uniform
 
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
@@ -99,6 +101,11 @@ OOS_PATTERNS = [
 ]
 IN_STOCK_TERMS = ["gold bar", "gold bars", "silver bar", "silver bars", "precious metals"]
 
+# Status normalization sets
+_OK_STATUSES = {"in stock", "available", "available online"}
+_BAD_STATUSES = {"out of stock", "sold out", "oos", "not available"}
+_SOFT_NO_STATUSES = {"backordered", "preorder", "pre order", "coming soon", "out of stock online"}
+
 # ------------------------------------------------------------------------------
 # Debug env print
 # ------------------------------------------------------------------------------
@@ -153,19 +160,33 @@ def _detect_metal(doc: dict) -> str:
     if "silver" in hay: return "silver"
     return "other"
 
+def _norm(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = s.replace("-", " ")
+    s = s.replace("_", " ")
+    s = s.replace("instock", "in stock")
+    s = s.replace("available online only", "available online")
+    return s
+
+def _doc_status(doc: dict) -> str:
+    # Prefer deliveryStatus if present
+    for k in ("deliveryStatus", "item_location_stockStatus", "item_location_availability", "availability", "stockStatus"):
+        if k in doc and isinstance(doc.get(k), str):
+            return _norm(doc.get(k))
+    return ""
 
 def _is_in_stock(doc: dict) -> bool:
+    st = _doc_status(doc)
+    if st in _OK_STATUSES:
+        return True
+    if st in _BAD_STATUSES or st in _SOFT_NO_STATUSES:
+        return False
     if "isItemInStock" in doc:
         try:
             return bool(doc["isItemInStock"])
         except Exception:
-            pass
-    status = (doc.get("item_location_stockStatus")
-              or doc.get("item_location_availability")
-              or doc.get("deliveryStatus")
-              or "").strip().lower()
-    return status in {"in stock", "instock", "available"}
-
+            return False
+    return False
 
 def parse_api_json(path: str) -> dict | None:
     if not os.path.exists(path):
@@ -183,16 +204,29 @@ def parse_api_json(path: str) -> dict | None:
         "silver": {"in_stock": 0, "out_of_stock": 0},
         "other": {"in_stock": 0, "out_of_stock": 0},
     }
+    instock_items = []
 
     for d in docs:
         m = _detect_metal(d)
         counts[m] = counts.get(m, 0) + 1
         if _is_in_stock(d):
             stock[m]["in_stock"] += 1
+            instock_items.append({
+                "id": str(d.get("item_number") or d.get("id") or ""),
+                "name": d.get("item_product_name") or d.get("name") or "",
+                "metal": m,
+                "status": _doc_status(d) or ("true" if bool(d.get("isItemInStock")) else ""),
+            })
         else:
             stock[m]["out_of_stock"] += 1
 
-    return {"numFound": num_found, "counts": counts, "stock": stock}
+    return {
+        "numFound": num_found,
+        "counts": counts,
+        "stock": stock,
+        "numInStockTotal": sum(v["in_stock"] for v in stock.values()),
+        "instock_items": instock_items,
+    }
 
 # ------------------------------------------------------------------------------
 # HAR miner (CI-reliable)
@@ -326,13 +360,10 @@ def scrape_dom_summary(page) -> dict | None:
         if seen == 0:
             return None
 
-        return {"numFound": seen, "counts": counts, "stock": stock}
+        return {"numFound": seen, "counts": counts, "stock": stock, "numInStockTotal": sum(v["in_stock"] for v in stock.values()), "instock_items": []}
 
     except Exception:
         return None
-
-from time import sleep
-from random import uniform
 
 RETRY_NAV_ATTEMPTS = int(os.getenv("RETRY_NAV_ATTEMPTS", "5"))
 
@@ -551,13 +582,15 @@ def build_text_from_summary(summary: dict) -> str:
     total = summary.get("numFound", gold + silver + summary["counts"].get("other", 0))
     g_in = summary["stock"]["gold"]["in_stock"]
     s_in = summary["stock"]["silver"]["in_stock"]
+    in_total = summary.get("numInStockTotal", g_in + s_in + summary["stock"]["other"]["in_stock"])
 
-    status_line = "🚨 Costco Precious Metals Listed!" if (g_in > 0 or s_in > 0) else "Costco Precious Metals — status update"
+    status_line = "🚨 Costco Precious Metals IN STOCK!" if in_total > 0 else "Costco Precious Metals — status update"
 
     text = (
         f"{status_line}\n\n"
         f"🕓 {ts}\n"
-        f"Items found: {total} | Gold: {gold} | Silver: {silver}\n"
+        f"Items listed: {total}  |  In stock: {in_total} (Gold {g_in}, Silver {s_in})\n"
+        f"Listed mix → Gold: {gold} | Silver: {silver}\n"
         "https://www.costco.com/precious-metals.html\n\n"
         "#Costco #Gold #Silver #CostcoPM"
     )
@@ -599,17 +632,9 @@ def _save_state(s):
 
 def _instock_set_from_summary(summary: dict) -> set:
     """Best-effort set of in-stock item identifiers; falls back to counts signature."""
-    # Prefer API JSON docs if present
     try:
-        with open(API_JSON_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        docs = data.get("response", {}).get("docs", [])
-        ids = set()
-        for d in docs:
-            status = (d.get("item_location_stockStatus") or d.get("item_location_availability") or d.get("deliveryStatus") or "").lower()
-            is_in = bool(d.get("isItemInStock")) or status in {"in stock", "instock", "available"}
-            if is_in:
-                ids.add(str(d.get("item_number") or d.get("id") or d.get("name") or ""))
+        items = summary.get("instock_items") or []
+        ids = {i.get("id") for i in items if i.get("id")}
         if ids:
             return ids
     except Exception:
@@ -863,7 +888,6 @@ def check_stock():
                     except Exception:
                         builtins.print("[info] No Lucidworks JSON observed within 10–20s on CI")
 
-
             else:
                 for wait in ("load", "domcontentloaded", "networkidle"):
                     try:
@@ -964,11 +988,19 @@ def check_stock():
         if summary:
             g_in = summary["stock"]["gold"]["in_stock"]
             s_in = summary["stock"]["silver"]["in_stock"]
+            in_total = summary.get("numInStockTotal", g_in + s_in + summary["stock"]["other"]["in_stock"])
             text = build_text_from_summary(summary)
             img = SCREENSHOT if os.path.exists(SCREENSHOT) else None
 
-            if g_in > 0 or s_in > 0:
+            if in_total > 0:
                 builtins.print("IN STOCK DETECTED!")
+                # Debug sample of items
+                try:
+                    sample = ", ".join((i["name"] or i["id"])[:60] for i in (summary.get("instock_items") or [])[:3])
+                    if sample:
+                        builtins.print(f"[debug] sample in-stock items: {sample}")
+                except Exception:
+                    pass
                 post_everywhere(img, text, summary_for_x=summary)
             else:
                 builtins.print("Out of stock")
@@ -990,7 +1022,8 @@ def check_stock():
                 text = build_text_from_summary(dom_summary)
                 g_in = dom_summary["stock"]["gold"]["in_stock"]
                 s_in = dom_summary["stock"]["silver"]["in_stock"]
-                if g_in > 0 or s_in > 0:
+                in_total = dom_summary.get("numInStockTotal", g_in + s_in + dom_summary["stock"]["other"]["in_stock"])
+                if in_total > 0:
                     builtins.print("IN STOCK DETECTED! (DOM)")
                     post_everywhere(img, text, summary_for_x=dom_summary)
                 else:
