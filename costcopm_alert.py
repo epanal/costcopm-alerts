@@ -325,26 +325,68 @@ from random import uniform
 
 RETRY_NAV_ATTEMPTS = int(os.getenv("RETRY_NAV_ATTEMPTS", "5"))
 
+def prewarm_costco(page):
+    """Touch cheap endpoints to stabilize TLS/HTTP2 and cookies."""
+    warmups = [
+        "https://www.costco.com/robots.txt",
+        "https://www.costco.com/",
+    ]
+    for u in warmups:
+        try:
+            page.goto(u, wait_until="domcontentloaded", timeout=15_000)
+        except Exception:
+            pass
+        try: page.wait_for_timeout(250)
+        except Exception: pass
+
 def robust_goto(page, url: str):
-    """
-    Navigate with multiple attempts, cycling wait_until strategies and
-    backing off on transient HTTP/2 INTERNAL_ERRORs.
-    """
-    waits = ["domcontentloaded", "load", "commit", "networkidle"]
+    """Multiple attempts with varied wait modes + short backoff."""
+    waits = ["commit", "domcontentloaded", "load", "networkidle"]
     last_err = None
     for attempt in range(1, RETRY_NAV_ATTEMPTS + 1):
         for wait in waits:
             try:
-                return page.goto(url, wait_until=wait, timeout=30_000)
+                return page.goto(url, wait_until=wait, timeout=25_000)
             except Exception as e:
                 last_err = e
-        # transient backoff with jitter
-        sleep(0.6 * attempt + uniform(0, 0.4))
+        sleep(0.5 * attempt + uniform(0, 0.4))
         try:
-            page.reload(wait_until="domcontentloaded", timeout=15_000)
+            page.reload(wait_until="domcontentloaded", timeout=12_000)
         except Exception:
             pass
     raise last_err or RuntimeError("robust_goto failed")
+
+def recreate_page(context):
+    """Close current pages and open a fresh one (same context)."""
+    try:
+        for p in context.pages:
+            try: p.close()
+            except Exception: pass
+    except Exception:
+        pass
+    return context.new_page()
+
+def relaunch_webkit(p, headless: bool, ua: str):
+    """One-time WebKit relaunch if session is poisoned."""
+    browser = p.webkit.launch(headless=headless, args=[])
+    context = browser.new_context(
+        viewport={"width": 1920, "height": 1080},
+        user_agent=ua,
+        ignore_https_errors=True,
+        locale="en-US",
+        timezone_id="America/Los_Angeles",
+        record_har_path="run.har",
+        record_har_omit_content=False,
+    )
+    context.set_extra_http_headers({
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": "https://www.costco.com/",
+        "Cache-Control": "max-age=0",
+    })
+    page = context.new_page()
+    return browser, context, page
 
 # ------------------------------------------------------------------------------
 # Screenshot helpers (force-load images, deblur, and capture)
@@ -734,11 +776,55 @@ def check_stock():
 
         try:
             if IS_CI:
+                # 0) Prewarm first (robots/home)
+                try: prewarm_costco(page)
+                except Exception: pass
+
+                # 1) Try direct goto with retries
                 try:
                     resp = robust_goto(page, URL)
                 except Exception as e:
                     builtins.print(f"[goto] robust_goto CI failed: {e}")
                     resp = None
+
+                # 2) If direct goto failed, try in-site navigation (home → click link)
+                if resp is None:
+                    try:
+                        page = recreate_page(context)
+                        prewarm_costco(page)
+                        # Load home and click through
+                        page.goto("https://www.costco.com/", wait_until="domcontentloaded", timeout=20_000)
+                        try:
+                            page.locator("a[href='/precious-metals.html']").first.click(timeout=5_000)
+                        except Exception:
+                            # Fallback: search for 'Precious Metals' link
+                            page.get_by_role("link", name=re.compile("Precious Metals", re.I)).first.click(timeout=6_000)
+                        # Wait for nav to settle a bit
+                        try: page.wait_for_load_state("domcontentloaded", timeout=10_000)
+                        except Exception: pass
+                        resp = page
+                    except Exception as e:
+                        builtins.print(f"[goto] home→click flow failed: {e}")
+                        resp = None
+
+                # 3) One-time full WebKit relaunch if still stuck
+                if resp is None:
+                    try:
+                        # Reuse your UA string from launch_browser()
+                        ua = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15")
+                        try:
+                            browser.close()
+                        except Exception:
+                            pass
+                        browser, context, page = relaunch_webkit(p, HEADLESS, ua)
+                        prewarm_costco(page)
+                        resp = robust_goto(page, URL)
+                    except Exception as e:
+                        builtins.print(f"[goto] relaunch webkit failed: {e}")
+                        resp = None
+
+                # 4) Best-effort wait for JSON/XHR
                 if resp:
                     try:
                         page.wait_for_response(
@@ -747,7 +833,8 @@ def check_stock():
                             timeout=20_000,
                         )
                     except Exception:
-                        builtins.print("[info] No Lucidworks JSON observed within 10s on CI")
+                        builtins.print("[info] No Lucidworks JSON observed within 10–20s on CI")
+
 
             else:
                 for wait in ("load", "domcontentloaded", "networkidle"):

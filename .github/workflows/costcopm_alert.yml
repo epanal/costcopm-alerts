@@ -57,6 +57,11 @@ jobs:
 
       - name: Run Costco PM alert
         run: python costcopm_alert.py
+        continue-on-error: true
+
+      - name: Retry once if failed
+        if: failure()
+        run: python costcopm_alert.py
 
       # Save artifacts so you can inspect failures (screenshot, captured JSON, HTML)
       - name: Upload artifacts
