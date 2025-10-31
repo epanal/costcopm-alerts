@@ -320,6 +320,32 @@ def scrape_dom_summary(page) -> dict | None:
     except Exception:
         return None
 
+from time import sleep
+from random import uniform
+
+RETRY_NAV_ATTEMPTS = int(os.getenv("RETRY_NAV_ATTEMPTS", "5"))
+
+def robust_goto(page, url: str):
+    """
+    Navigate with multiple attempts, cycling wait_until strategies and
+    backing off on transient HTTP/2 INTERNAL_ERRORs.
+    """
+    waits = ["domcontentloaded", "load", "commit", "networkidle"]
+    last_err = None
+    for attempt in range(1, RETRY_NAV_ATTEMPTS + 1):
+        for wait in waits:
+            try:
+                return page.goto(url, wait_until=wait, timeout=30_000)
+            except Exception as e:
+                last_err = e
+        # transient backoff with jitter
+        sleep(0.6 * attempt + uniform(0, 0.4))
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=15_000)
+        except Exception:
+            pass
+    raise last_err or RuntimeError("robust_goto failed")
+
 # ------------------------------------------------------------------------------
 # Screenshot helpers (force-load images, deblur, and capture)
 # ------------------------------------------------------------------------------
@@ -708,15 +734,21 @@ def check_stock():
 
         try:
             if IS_CI:
-                resp = page.goto(URL, wait_until="domcontentloaded", timeout=30_000)
                 try:
-                    page.wait_for_response(
-                        lambda r: (("search.costco.com" in r.url) or ("costco.com" in r.url))
-                                  and ("application/json" in (r.headers or {}).get("content-type", "")),
-                        timeout=20_000,
-                    )
-                except Exception:
-                    builtins.print("[info] No Lucidworks JSON observed within 10s on CI")
+                    resp = robust_goto(page, URL)
+                except Exception as e:
+                    builtins.print(f"[goto] robust_goto CI failed: {e}")
+                    resp = None
+                if resp:
+                    try:
+                        page.wait_for_response(
+                            lambda r: (("search.costco.com" in r.url) or ("costco.com" in r.url))
+                                    and ("application/json" in (r.headers or {}).get("content-type", "")),
+                            timeout=20_000,
+                        )
+                    except Exception:
+                        builtins.print("[info] No Lucidworks JSON observed within 10s on CI")
+
             else:
                 for wait in ("load", "domcontentloaded", "networkidle"):
                     try:
