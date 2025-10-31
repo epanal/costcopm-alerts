@@ -3,23 +3,17 @@ name: Costco PM Alert
 on:
   workflow_dispatch:
   schedule:
-    # Runs every 30 minutes (GitHub Actions uses UTC)
+    # Every 30 minutes (GitHub Actions uses UTC)
     - cron: "*/30 * * * *"
+  push:
+    branches: [ main ]
 
 jobs:
   run-alert:
     runs-on: ubuntu-latest
 
-    # Keep secrets out of logs; set your two Bluesky creds in repo Settings → Secrets → Actions
-    env:
-      CI: "true"
-      BROWSER: "webkit"                 # your script defaults to webkit on CI, this is just explicit
-      HEADLESS: "true"                  # headless is most reliable in CI
-      POST_STATUS_UPDATES: "true"       # post even when OOS
-      # Optional: post even if we couldn't determine status (no JSON / consent wall, etc.)
-      ALWAYS_POST_WHEN_INCONCLUSIVE: "true"
-      BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
-      BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+    # Don't run on PRs from forks (no secrets there)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
 
     steps:
       - name: Checkout
@@ -40,32 +34,70 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip wheel
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
             pip install playwright python-dotenv atproto tweepy
           fi
 
-      - name: Install Playwright (webkit) + system deps
-        run: |
-          python -m playwright install --with-deps webkit
+      - name: Install Playwright (WebKit) + system deps
+        run: python -m playwright install --with-deps webkit
 
-      # If you ever need headful (HEADLESS=false), wrap the run step with xvfb-run:
-      # - name: Run script (headful)
-      #   run: xvfb-run -a python costcopm_alert.py
+      # Optional: cache Playwright browsers between runs (speeds up cold starts)
+      - name: Cache Playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-webkit
 
       - name: Run Costco PM alert
-        run: python costcopm_alert.py
+        env:
+          # Runtime knobs
+          CI: "true"
+          BROWSER: "webkit"
+          HEADLESS: "true"
+          POST_STATUS_UPDATES: "true"
+          ALWAYS_POST_WHEN_INCONCLUSIVE: "true"
+
+          # Bluesky (required)
+          BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
+          BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+
+          # X / Twitter (force on in CI; code still gates by cooldown/state-change)
+          POST_TO_X: "true"
+          MAX_X_POSTS_PER_MONTH: "450"
+          MIN_SECONDS_BETWEEN_X_POSTS: "1800"
+          TW_CONSUMER_KEY: ${{ secrets.TW_CONSUMER_KEY }}
+          TW_CONSUMER_SECRET: ${{ secrets.TW_CONSUMER_SECRET }}
+          TW_ACCESS_TOKEN: ${{ secrets.TW_ACCESS_TOKEN }}
+          TW_ACCESS_TOKEN_SECRET: ${{ secrets.TW_ACCESS_TOKEN_SECRET }}
+        run: |
+          echo "Running Costco Precious Metals Alert..."
+          python costcopm_alert.py
         continue-on-error: true
 
       - name: Retry once if failed
         if: failure()
+        env:
+          CI: "true"
+          BROWSER: "webkit"
+          HEADLESS: "true"
+          POST_STATUS_UPDATES: "true"
+          ALWAYS_POST_WHEN_INCONCLUSIVE: "true"
+          BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
+          BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+          POST_TO_X: "true"
+          MAX_X_POSTS_PER_MONTH: "450"
+          MIN_SECONDS_BETWEEN_X_POSTS: "1800"
+          TW_CONSUMER_KEY: ${{ secrets.TW_CONSUMER_KEY }}
+          TW_CONSUMER_SECRET: ${{ secrets.TW_CONSUMER_SECRET }}
+          TW_ACCESS_TOKEN: ${{ secrets.TW_ACCESS_TOKEN }}
+          TW_ACCESS_TOKEN_SECRET: ${{ secrets.TW_ACCESS_TOKEN_SECRET }}
         run: python costcopm_alert.py
 
-      # Save artifacts so you can inspect failures (screenshot, captured JSON, HTML)
       - name: Upload artifacts
-        if: always()  # always upload, even if the job fails
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: run-artifacts
@@ -73,4 +105,6 @@ jobs:
             costco.png
             api-sample.json
             page.html
+            run.har
+            .x_post_state.json
           if-no-files-found: ignore
