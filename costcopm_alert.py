@@ -66,14 +66,24 @@ if not BSKY_HANDLE or not BSKY_APP_PASSWORD:
 POST_STATUS_UPDATES = os.getenv("POST_STATUS_UPDATES", "false").lower() in {"1","true","yes","on"}
 ALWAYS_POST_WHEN_INCONCLUSIVE = os.getenv("ALWAYS_POST_WHEN_INCONCLUSIVE", "false").lower() in {"1","true","yes","on"}
 
-# X (Twitter) gating + creds
-POST_TO_X = os.getenv("POST_TO_X", "false").lower() in {"1","true","yes","on"}
-MAX_X_POSTS_PER_MONTH = int(os.getenv("MAX_X_POSTS_PER_MONTH", "450"))
-MIN_SECONDS_BETWEEN_X_POSTS = int(os.getenv("MIN_SECONDS_BETWEEN_X_POSTS", "1800"))
+# --- X (Twitter) creds FIRST ---------------------------------------------------
 TW_CONSUMER_KEY = os.getenv("TW_CONSUMER_KEY")
 TW_CONSUMER_SECRET = os.getenv("TW_CONSUMER_SECRET")
 TW_ACCESS_TOKEN = os.getenv("TW_ACCESS_TOKEN")
 TW_ACCESS_TOKEN_SECRET = os.getenv("TW_ACCESS_TOKEN_SECRET")
+
+_HAVE_X_CREDS = all([TW_CONSUMER_KEY, TW_CONSUMER_SECRET, TW_ACCESS_TOKEN, TW_ACCESS_TOKEN_SECRET])
+
+# --- X (Twitter) gating --------------------------------------------------------
+# If POST_TO_X is explicitly set, honor it. If it's not set, auto-enable when creds exist.
+_post_to_x_env = os.getenv("POST_TO_X")
+if _post_to_x_env is None:
+    POST_TO_X = _HAVE_X_CREDS
+else:
+    POST_TO_X = _post_to_x_env.lower() in {"1","true","yes","on"}
+
+MAX_X_POSTS_PER_MONTH = int(os.getenv("MAX_X_POSTS_PER_MONTH", "450"))
+MIN_SECONDS_BETWEEN_X_POSTS = int(os.getenv("MIN_SECONDS_BETWEEN_X_POSTS", "1800"))
 
 URL = "https://www.costco.com/precious-metals.html"
 API_JSON_PATH = "api-sample.json"
