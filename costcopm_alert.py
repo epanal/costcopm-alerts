@@ -291,13 +291,13 @@ def extract_api_from_har(har_path: str, out_path: str) -> bool:
 # DOM scrape fallback
 # ------------------------------------------------------------------------------
 def scrape_dom_summary(page) -> dict | None:
-    """Produce a summary from rendered tiles (last resort)."""
+    """Produce a summary from rendered tiles with robust button-based stock detection."""
     try:
-        # try a few cycles: wait, scroll, idle
+        # Wait/scroll cycles to allow tiles to render
         for _ in range(6):
             try:
                 page.wait_for_selector(
-                    "[data-automation='product-tile'], .product-tile, [data-automation='product-grid'] a",
+                    "[data-automation='product-tile'], .product-tile, [data-testid^='ProductTile_']",
                     timeout=2500,
                 )
                 break
@@ -310,24 +310,30 @@ def scrape_dom_summary(page) -> dict | None:
         else:
             return None
 
-        # Gather tiles
-        tiles = []
-        for sel in ("[data-automation='product-tile']", ".product-tile", "[data-automation='product-grid'] a"):
-            try:
-                count = page.locator(sel).count()
-                for i in range(count):
-                    tiles.append((sel, i))
-            except Exception:
-                pass
-
-        if not tiles:
-            return None
-
         def detect_metal_from_text(t: str) -> str:
-            s = t.lower()
+            s = (t or "").lower()
             if "gold" in s: return "gold"
             if "silver" in s: return "silver"
             return "other"
+
+        # Helper: in-stock if buyable action exists on tile
+        def _tile_in_stock(tile_locator) -> bool:
+            try:
+                # Positive signals (buyable)
+                if tile_locator.locator('button:has-text("Add to Cart")').count() > 0:
+                    return True
+                if tile_locator.locator('button:has-text("Select Options")').count() > 0:
+                    return True
+                # Negative signals (not directly buyable)
+                if tile_locator.locator('button:has-text("Sign In for Details")').count() > 0:
+                    return False
+                # Fallback: price visible within tile
+                txt = (tile_locator.inner_text(timeout=800) or "")
+                if "$" in txt:
+                    return True
+            except Exception:
+                pass
+            return False
 
         counts = {"gold": 0, "silver": 0, "other": 0}
         stock = {
@@ -335,12 +341,18 @@ def scrape_dom_summary(page) -> dict | None:
             "silver": {"in_stock": 0, "out_of_stock": 0},
             "other": {"in_stock": 0, "out_of_stock": 0},
         }
+        instock_items = []
 
+        # Prefer the new ProductTile_* structure; fallback to legacy selectors
+        tiles_sel = "[data-testid^='ProductTile_'], [data-automation='product-tile'], .product-tile"
+        tiles = page.locator(tiles_sel)
+        n = tiles.count()
         seen = 0
-        for sel, idx in tiles:
-            loc = page.locator(sel).nth(idx)
+
+        for i in range(n):
+            loc = tiles.nth(i)
             try:
-                txt = (loc.inner_text(timeout=1000) or "").strip()
+                txt = (loc.inner_text(timeout=1200) or "").strip()
             except Exception:
                 txt = ""
             if not txt:
@@ -350,20 +362,58 @@ def scrape_dom_summary(page) -> dict | None:
             counts[m] = counts.get(m, 0) + 1
             seen += 1
 
-            tlow = txt.lower()
-            in_stock = ("in stock" in tlow) or ("$" in tlow) or ("add to cart" in tlow) or ("price" in tlow)
+            in_stock = _tile_in_stock(loc)
             if in_stock:
                 stock[m]["in_stock"] += 1
             else:
                 stock[m]["out_of_stock"] += 1
 
+            # Extract id + name when possible (works on ProductTile_* cards)
+            try:
+                data_id = ""
+                testid = loc.get_attribute("data-testid") or ""
+                if testid.startswith("ProductTile_"):
+                    data_id = testid.replace("ProductTile_", "")
+                name = ""
+                # Try common name spots
+                for sel_try in (
+                    '[data-testid="Link"] span',
+                    "a span",
+                    "h3, h2",
+                    "[data-automation='product-name']",
+                ):
+                    try:
+                        tloc = loc.locator(sel_try).first
+                        if tloc.count() > 0:
+                            name = (tloc.inner_text(timeout=600) or "").strip()
+                            if name:
+                                break
+                    except Exception:
+                        pass
+                if in_stock and (data_id or name):
+                    instock_items.append({
+                        "id": data_id,
+                        "name": name,
+                        "metal": m,
+                        "status": "in stock",
+                    })
+            except Exception:
+                pass
+
         if seen == 0:
             return None
 
-        return {"numFound": seen, "counts": counts, "stock": stock, "numInStockTotal": sum(v["in_stock"] for v in stock.values()), "instock_items": []}
+        return {
+            "numFound": seen,
+            "counts": counts,
+            "stock": stock,
+            "numInStockTotal": sum(v["in_stock"] for v in stock.values()),
+            "instock_items": instock_items,
+        }
 
     except Exception:
         return None
+
 
 RETRY_NAV_ATTEMPTS = int(os.getenv("RETRY_NAV_ATTEMPTS", "5"))
 
@@ -914,6 +964,22 @@ def check_stock():
         except Exception:
             pass
 
+        # --- NEW: ensure 'Show Out of Stock Items' facet is OFF ---
+        try:
+            # If the OOS facet chip is toggled on, click it to turn it off.
+            # Works whether it appears as a chip or a facet button.
+            oos_chip = page.locator('[data-testid="Button_facet_option_sf__Show Out of Stock Items"]').first
+            if oos_chip.count() > 0:
+                oos_chip.click(timeout=2500)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
+                builtins.print("[info] OOS facet turned OFF")
+        except Exception as e:
+            builtins.print(f"[info] OOS facet not toggled (maybe not present): {e}")
+
+
         # Brief settle
         try:
             page.wait_for_timeout(2500)
@@ -973,7 +1039,12 @@ def check_stock():
 
         # Fallback: DOM tile count (for posting heuristics if needed)
         tile_count = 0
-        for sel in ('[data-automation="product-tile"]', '.product-tile', '[data-automation="product-grid"] a'):
+        for sel in (
+            '[data-testid^="ProductTile_"]',
+            '[data-automation="product-tile"]',
+            '.product-tile',
+            '[data-automation="product-grid"] a',
+        ):
             try:
                 c = page.locator(sel).count()
                 tile_count = max(tile_count, c or 0)
