@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Costco Precious Metals → Bluesky + X Alert (CI-safe)
+Costco Precious Metals → Bluesky (CI-safe)
 
 Flow:
   1) Launch Playwright and open the Precious Metals page.
@@ -20,14 +20,6 @@ Env:
   BSKY_HANDLE=you.bsky.social
   BSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
 
-  # X (Twitter)
-  POST_TO_X=true|false
-  MAX_X_POSTS_PER_MONTH=450
-  MIN_SECONDS_BETWEEN_X_POSTS=1800
-  TW_CONSUMER_KEY=...
-  TW_CONSUMER_SECRET=...
-  TW_ACCESS_TOKEN=...
-  TW_ACCESS_TOKEN_SECRET=...
 """
 
 import os
