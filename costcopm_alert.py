@@ -34,7 +34,6 @@ import os
 import re
 import sys
 import json
-import time
 import builtins
 from pathlib import Path
 from datetime import datetime
@@ -45,7 +44,6 @@ from random import uniform
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 from atproto import Client, models
-import tweepy
 
 
 # ------------------------------------------------------------------------------
@@ -68,30 +66,10 @@ if not BSKY_HANDLE or not BSKY_APP_PASSWORD:
 POST_STATUS_UPDATES = os.getenv("POST_STATUS_UPDATES", "false").lower() in {"1","true","yes","on"}
 ALWAYS_POST_WHEN_INCONCLUSIVE = os.getenv("ALWAYS_POST_WHEN_INCONCLUSIVE", "false").lower() in {"1","true","yes","on"}
 
-# --- X (Twitter) creds FIRST ---------------------------------------------------
-TW_CONSUMER_KEY = os.getenv("TW_CONSUMER_KEY")
-TW_CONSUMER_SECRET = os.getenv("TW_CONSUMER_SECRET")
-TW_ACCESS_TOKEN = os.getenv("TW_ACCESS_TOKEN")
-TW_ACCESS_TOKEN_SECRET = os.getenv("TW_ACCESS_TOKEN_SECRET")
-
-_HAVE_X_CREDS = all([TW_CONSUMER_KEY, TW_CONSUMER_SECRET, TW_ACCESS_TOKEN, TW_ACCESS_TOKEN_SECRET])
-
-# --- X (Twitter) gating --------------------------------------------------------
-# If POST_TO_X is explicitly set, honor it. If it's not set, auto-enable when creds exist.
-_post_to_x_env = os.getenv("POST_TO_X")
-if _post_to_x_env is None:
-    POST_TO_X = _HAVE_X_CREDS
-else:
-    POST_TO_X = _post_to_x_env.lower() in {"1","true","yes","on"}
-
-MAX_X_POSTS_PER_MONTH = int(os.getenv("MAX_X_POSTS_PER_MONTH", "450"))
-MIN_SECONDS_BETWEEN_X_POSTS = int(os.getenv("MIN_SECONDS_BETWEEN_X_POSTS", "1800"))
-
 URL = "https://www.costco.com/precious-metals.html"
 API_JSON_PATH = "api-sample.json"
 HAR_PATH = "run.har"
 SCREENSHOT = "costco.png"
-STATE_PATH = Path(".x_post_state.json")
 TIMEOUT = 90_000  # ms
 
 OOS_PATTERNS = [
@@ -112,9 +90,7 @@ _SOFT_NO_STATUSES = {"backordered", "preorder", "pre order", "coming soon", "out
 builtins.print(
     f"[env] CI={IS_CI} BROWSER={USE_BROWSER} HEADLESS={HEADLESS} "
     f"POST_STATUS_UPDATES={POST_STATUS_UPDATES} "
-    f"ALWAYS_POST_WHEN_INCONCLUSIVE={ALWAYS_POST_WHEN_INCONCLUSIVE} "
-    f"POST_TO_X={POST_TO_X} MAX_X_POSTS_PER_MONTH={MAX_X_POSTS_PER_MONTH} "
-    f"MIN_SECONDS_BETWEEN_X_POSTS={MIN_SECONDS_BETWEEN_X_POSTS}"
+    f"ALWAYS_POST_WHEN_INCONCLUSIVE={ALWAYS_POST_WHEN_INCONCLUSIVE}"
 )
 
 # ------------------------------------------------------------------------------
@@ -669,122 +645,8 @@ def post_to_bluesky(image_path: str | None, text: str) -> None:
     except Exception as e:
         builtins.print(f"Bluesky post failed: {e}", file=sys.stderr)
 
-# ----- X (Twitter) posting with gating ----------------------------------------
-def _load_state():
-    if STATE_PATH.exists():
-        try: return json.load(open(STATE_PATH, "r", encoding="utf-8"))
-        except Exception: return {}
-    return {}
-
-def _save_state(s):
-    try: json.dump(s, open(STATE_PATH, "w", encoding="utf-8"), indent=2)
-    except Exception: pass
-
-def _instock_set_from_summary(summary: dict) -> set:
-    """Best-effort set of in-stock item identifiers; falls back to counts signature."""
-    try:
-        items = summary.get("instock_items") or []
-        ids = {i.get("id") for i in items if i.get("id")}
-        if ids:
-            return ids
-    except Exception:
-        pass
-    # Fallback: encode counts
-    c = summary.get("counts", {})
-    s = summary.get("stock", {})
-    key = (c.get("gold",0), c.get("silver",0),
-           s.get("gold",{}).get("in_stock",0), s.get("silver",{}).get("in_stock",0))
-    return {f"counts:{key}"}
-
-def _can_post_to_x_now(summary: dict) -> tuple[bool, str]:
-    if not POST_TO_X:
-        return (False, "POST_TO_X disabled")
-
-    s = _load_state()
-    now = int(time.time())
-    month_key = datetime.utcfromtimestamp(now).strftime("%Y-%m")
-
-    # monthly cap
-    counts = s.get("month_counts", {})
-    used = int(counts.get(month_key, 0))
-    if used >= MAX_X_POSTS_PER_MONTH:
-        return (False, f"month cap reached {used}/{MAX_X_POSTS_PER_MONTH}")
-
-    # cooldown
-    last_ts = int(s.get("last_x_post_ts", 0))
-    if last_ts and (now - last_ts) < MIN_SECONDS_BETWEEN_X_POSTS:
-        return (False, f"cooldown {(now - last_ts)}s < {MIN_SECONDS_BETWEEN_X_POSTS}s")
-
-    # change detection
-    current_ids = _instock_set_from_summary(summary)
-    last_ids = set(s.get("last_instock_ids", []))
-    if current_ids == last_ids:
-        return (False, "no change in in-stock set")
-
-    return (True, "ok")
-
-def _record_x_post(summary: dict):
-    s = _load_state()
-    now = int(time.time())
-    month_key = datetime.utcfromtimestamp(now).strftime("%Y-%m")
-    counts = s.get("month_counts", {})
-    counts[month_key] = int(counts.get(month_key, 0)) + 1
-    s["month_counts"] = counts
-    s["last_x_post_ts"] = now
-    s["last_instock_ids"] = list(_instock_set_from_summary(summary))
-    _save_state(s)
-
-def post_to_x(image_path: str | None, text: str) -> None:
-    """Post to X (Twitter) using OAuth 1.0a user context (Tweepy)."""
-    missing = [k for k,v in {
-        "TW_CONSUMER_KEY": TW_CONSUMER_KEY,
-        "TW_CONSUMER_SECRET": TW_CONSUMER_SECRET,
-        "TW_ACCESS_TOKEN": TW_ACCESS_TOKEN,
-        "TW_ACCESS_TOKEN_SECRET": TW_ACCESS_TOKEN_SECRET,
-    }.items() if not v]
-    if missing:
-        builtins.print(f"[x] Skipping X post; missing creds: {', '.join(missing)}")
-        return
-    try:
-        auth = tweepy.OAuth1UserHandler(
-            TW_CONSUMER_KEY, TW_CONSUMER_SECRET, TW_ACCESS_TOKEN, TW_ACCESS_TOKEN_SECRET
-        )
-        api_v1 = tweepy.API(auth)  # media upload
-        client_v2 = tweepy.Client(
-            consumer_key=TW_CONSUMER_KEY,
-            consumer_secret=TW_CONSUMER_SECRET,
-            access_token=TW_ACCESS_TOKEN,
-            access_token_secret=TW_ACCESS_TOKEN_SECRET
-        )
-
-        media_ids = None
-        if image_path and os.path.exists(image_path):
-            try:
-                media = api_v1.media_upload(filename=image_path)
-                media_ids = [media.media_id_string]
-            except Exception as e:
-                builtins.print(f"[x] media_upload failed: {e}")
-
-        if media_ids:
-            client_v2.create_tweet(text=text, media_ids=media_ids)
-        else:
-            client_v2.create_tweet(text=text)
-        builtins.print("[x] X post sent!")
-    except Exception as e:
-        builtins.print(f"[x] X post failed: {e}", file=sys.stderr)
-
-def post_everywhere(image_path: str | None, text: str, *, summary_for_x: dict | None = None) -> None:
-    # Always Bluesky
+def post_everywhere(image_path: str | None, text: str, *, summary_for_x=None) -> None:
     post_to_bluesky(image_path, text)
-    # X is gated
-    if summary_for_x is None:
-        return
-    ok, reason = _can_post_to_x_now(summary_for_x)
-    if not ok:
-        builtins.print(f"[x] Skip X post: {reason}")
-        return
-    post_to_x(image_path, text)
-    _record_x_post(summary_for_x)
 
 # ------------------------------------------------------------------------------
 # Browser launcher (records HAR)

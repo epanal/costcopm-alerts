@@ -2,4 +2,3 @@ playwright>=1.45
 python-dotenv
 atproto
 requests
-tweepy>=4.14
