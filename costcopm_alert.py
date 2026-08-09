@@ -400,20 +400,17 @@ def prewarm_costco(page):
         except Exception: pass
 
 def robust_goto(page, url: str):
-    """Multiple attempts with varied wait modes + short backoff."""
-    waits = ["commit", "domcontentloaded"]
+    """Multiple attempts with short backoff."""
     last_err = None
+
     for attempt in range(1, RETRY_NAV_ATTEMPTS + 1):
-        for wait in waits:
-            try:
-                return page.goto(url, wait_until=wait, timeout=25_000)
-            except Exception as e:
-                last_err = e
-        sleep(0.5 * attempt + uniform(0, 0.4))
         try:
-            page.reload(wait_until="domcontentloaded", timeout=12_000)
-        except Exception:
-            pass
+            return page.goto(url, wait_until="commit", timeout=15_000)
+        except Exception as e:
+            last_err = e
+
+        sleep(0.5 * attempt + uniform(0, 0.4))
+
     raise last_err or RuntimeError("robust_goto failed")
 
 def recreate_page(context):
