@@ -41,8 +41,8 @@ jobs:
             pip install playwright python-dotenv atproto tweepy
           fi
 
-      - name: Install Playwright (WebKit) + system deps
-        run: python -m playwright install --with-deps webkit
+      - name: Install Playwright (Chromium) + system deps
+        run: python -m playwright install --with-deps chromium
 
       # Optional: cache Playwright browsers between runs (speeds up cold starts)
       - name: Cache Playwright
@@ -55,7 +55,7 @@ jobs:
         env:
           # Runtime knobs
           CI: "true"
-          BROWSER: "webkit"
+          BROWSER: "chromium"
           HEADLESS: "true"
           POST_STATUS_UPDATES: "true"
           ALWAYS_POST_WHEN_INCONCLUSIVE: "true"
@@ -81,19 +81,12 @@ jobs:
         if: failure()
         env:
           CI: "true"
-          BROWSER: "webkit"
+          BROWSER: "chromium"
           HEADLESS: "true"
           POST_STATUS_UPDATES: "true"
           ALWAYS_POST_WHEN_INCONCLUSIVE: "true"
           BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
           BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
-          POST_TO_X: "true"
-          MAX_X_POSTS_PER_MONTH: "450"
-          MIN_SECONDS_BETWEEN_X_POSTS: "1800"
-          TW_CONSUMER_KEY: ${{ secrets.TW_CONSUMER_KEY }}
-          TW_CONSUMER_SECRET: ${{ secrets.TW_CONSUMER_SECRET }}
-          TW_ACCESS_TOKEN: ${{ secrets.TW_ACCESS_TOKEN }}
-          TW_ACCESS_TOKEN_SECRET: ${{ secrets.TW_ACCESS_TOKEN_SECRET }}
         run: python costcopm_alert.py
 
       - name: Upload artifacts
