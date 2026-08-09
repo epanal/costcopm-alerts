@@ -52,6 +52,7 @@ jobs:
           key: ${{ runner.os }}-playwright-webkit
 
       - name: Run Costco PM alert
+        timeout-minutes: 8
         env:
           # Runtime knobs
           CI: "true"
@@ -64,14 +65,6 @@ jobs:
           BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
           BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
 
-          # X / Twitter (force on in CI; code still gates by cooldown/state-change)
-          POST_TO_X: "true"
-          MAX_X_POSTS_PER_MONTH: "450"
-          MIN_SECONDS_BETWEEN_X_POSTS: "1800"
-          TW_CONSUMER_KEY: ${{ secrets.TW_CONSUMER_KEY }}
-          TW_CONSUMER_SECRET: ${{ secrets.TW_CONSUMER_SECRET }}
-          TW_ACCESS_TOKEN: ${{ secrets.TW_ACCESS_TOKEN }}
-          TW_ACCESS_TOKEN_SECRET: ${{ secrets.TW_ACCESS_TOKEN_SECRET }}
         run: |
           echo "Running Costco Precious Metals Alert..."
           python costcopm_alert.py
@@ -87,7 +80,7 @@ jobs:
           ALWAYS_POST_WHEN_INCONCLUSIVE: "true"
           BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
           BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
-        run: python costcopm_alert.py
+        run: python -u costcopm_alert.py
 
       - name: Upload artifacts
         if: always()
