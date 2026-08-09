@@ -648,7 +648,7 @@ def launch_browser(p):
         args = []
         if USE_BROWSER in ("chromium", "chrome"):
             if IS_CI:
-                args += ["--no-sandbox", "--disable-dev-shm-usage"]
+                args += ["--no-sandbox", "--disable-dev-shm-usage", "--disable-http2"]
             browser = (
                 p.chromium.launch(channel="chrome", headless=HEADLESS, args=args)
                 if USE_BROWSER == "chrome"
