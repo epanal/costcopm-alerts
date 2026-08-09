@@ -67,7 +67,7 @@ jobs:
 
         run: |
           echo "Running Costco Precious Metals Alert..."
-          python costcopm_alert.py
+          python -u costcopm_alert.py
         continue-on-error: true
 
       - name: Retry once if failed
