@@ -383,7 +383,7 @@ def scrape_dom_summary(page) -> dict | None:
         return None
 
 
-RETRY_NAV_ATTEMPTS = int(os.getenv("RETRY_NAV_ATTEMPTS", "5"))
+RETRY_NAV_ATTEMPTS = int(os.getenv("RETRY_NAV_ATTEMPTS", "2"))
 
 def prewarm_costco(page):
     """Touch cheap endpoints to stabilize TLS/HTTP2 and cookies."""
@@ -401,7 +401,7 @@ def prewarm_costco(page):
 
 def robust_goto(page, url: str):
     """Multiple attempts with varied wait modes + short backoff."""
-    waits = ["commit", "domcontentloaded", "load", "networkidle"]
+    waits = ["commit", "domcontentloaded"]
     last_err = None
     for attempt in range(1, RETRY_NAV_ATTEMPTS + 1):
         for wait in waits:
@@ -764,24 +764,7 @@ def check_stock():
                         builtins.print(f"[goto] home→click flow failed: {e}")
                         resp = None
 
-                # 3) One-time full WebKit relaunch if still stuck
-                if resp is None:
-                    try:
-                        # Reuse your UA string from launch_browser()
-                        ua = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15")
-                        try:
-                            browser.close()
-                        except Exception:
-                            pass
-                        browser, context, page = relaunch_webkit(p, HEADLESS, ua)
-                        prewarm_costco(page)
-                        resp = robust_goto(page, URL)
-                    except Exception as e:
-                        builtins.print(f"[goto] relaunch webkit failed: {e}")
-                        resp = None
-
-                # 4) Best-effort wait for JSON/XHR
+                # 3) Best-effort wait for JSON/XHR
                 if resp:
                     try:
                         page.wait_for_response(
